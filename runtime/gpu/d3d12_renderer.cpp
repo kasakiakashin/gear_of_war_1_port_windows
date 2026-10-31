@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -142,7 +143,13 @@ struct Renderer {
   size_t upload_offset = 0;
   // Buffers de vértices já copiados neste submit, por (endereço físico, tamanho): os modelos repetem-se muito
   // entre desenhos. GOW_NO_VB_CACHE=1 copia sempre.
-  std::unordered_map<uint64_t, D3D12_GPU_VIRTUAL_ADDRESS> vb_cache;
+  struct VbCopy {
+    D3D12_GPU_VIRTUAL_ADDRESS va;
+    uint64_t hash;
+  };
+  std::unordered_map<uint64_t, VbCopy> vb_cache;
+  uint64_t vb_stale = 0;
+  int shader_wait_ms = 0;  // tempo já gasto neste frame à espera do FXC
   ID3D12DescriptorHeap *srv_heap = nullptr, *sampler_heap = nullptr, *rtv_heap = nullptr, *dsv_heap = nullptr;
   uint32_t srv_inc = 0, sampler_inc = 0, rtv_inc = 0, dsv_inc = 0;
   uint32_t srv_next = 0, sampler_next = 0, rtv_next = 0, dsv_next = 0;
@@ -872,8 +879,9 @@ void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_stat
 
 // ---- Shaders ----
 // Compilação FXC em threads de fundo: o FXC demora de 50 ms a vários segundos por shader e parava o processador de
-// comandos ao entrar em áreas novas. Enquanto compila, os desenhos que o usam são saltados (como o modo assíncrono
-// do Xenia). GOW_SYNC_SHADERS=1 compila no momento (sem desenhos em falta, com paragens).
+// comandos ao entrar em áreas novas. Um desenho espera pelo seu shader até gastar o orçamento do frame (GOW_SHADER_WAIT_MS,
+// 500 ms): sem isto, numa cache vazia, as personagens (VS de skinning, até 8 s de FXC) ficavam invisíveis durante as
+// primeiras cenas. Esgotado o orçamento, é saltado, como no modo assíncrono do Xenia. GOW_SYNC_SHADERS=1 compila no momento.
 struct CompileJob {
   Compiled* c;
   std::string name, target;
@@ -908,6 +916,23 @@ void finish_compile(Compiled& c, const std::string& name, const std::filesystem:
                  c.info.cf_count, c.info.alu_count, c.info.fetch_count, err.c_str());
 }
 
+bool wait_for_shader(Compiled& c) {
+  static const int budget_ms = [] {
+    const char* e = std::getenv("GOW_SHADER_WAIT_MS");
+    return e ? std::atoi(e) : 500;
+  }();
+  const ULONGLONG t0 = GetTickCount64();
+  while (c.pending.load(std::memory_order_acquire)) {
+    if ((int)(GetTickCount64() - t0) + g.shader_wait_ms >= budget_ms) {
+      g.shader_wait_ms += (int)(GetTickCount64() - t0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  g.shader_wait_ms += (int)(GetTickCount64() - t0);
+  return true;
+}
+
 void compile_worker() {
   for (;;) {
     CompileJob job;
@@ -934,7 +959,7 @@ Compiled* shader(bool pixel) {
   uint64_t h = (pixel ? g.ps_hash : g.vs_hash) ^ (pixel ? 0x5053ull : 0x5653ull);
   auto it = g.shaders.find(h);
   if (it != g.shaders.end()) {
-    if (it->second.pending.load(std::memory_order_acquire)) return nullptr;
+    if (it->second.pending.load(std::memory_order_acquire) && !wait_for_shader(it->second)) return nullptr;
     return it->second.blob ? &it->second : nullptr;
   }
   Compiled& c = g.shaders[h];
@@ -967,14 +992,19 @@ Compiled* shader(bool pixel) {
   if (c.info.ok && !c.blob && !sync) {
     static std::once_flag workers;
     std::call_once(workers, [] {
-      for (int i = 0; i < 2; i++) std::thread(compile_worker).detach();
+      const char* e = std::getenv("GOW_FXC_THREADS");
+      const int hc = (int)std::thread::hardware_concurrency();
+      const int workers_n = e ? std::atoi(e) : std::clamp(hc - 2, 2, 6);
+      for (int i = 0; i < workers_n; i++) std::thread(compile_worker).detach();
     });
     c.pending = true;
     g_compiles_pending.fetch_add(1);
-    std::lock_guard<std::mutex> lock(g_compile_mu);
-    g_compile_jobs.push_back({&c, name, pixel ? "ps_5_1" : "vs_5_1", cache_file, u});
+    {
+      std::lock_guard<std::mutex> lock(g_compile_mu);
+      g_compile_jobs.push_back({&c, name, pixel ? "ps_5_1" : "vs_5_1", cache_file, u});
+    }
     g_compile_cv.notify_one();
-    return nullptr;
+    return wait_for_shader(c) && c.blob ? &c : nullptr;
   }
   if (c.info.ok && !c.blob) c.blob = compile_hlsl(c.info.hlsl, pixel ? "ps_5_1" : "vs_5_1", name, &err);
   finish_compile(c, name, cached ? std::filesystem::path() : cache_file, u, err, GetTickCount64() - t0);
@@ -1827,12 +1857,17 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     if (gpu_physical(addr) + (uint64_t)size > 0x20000000u) size = 0x20000000u - gpu_physical(addr);
     static const bool no_vb_cache = std::getenv("GOW_NO_VB_CACHE") != nullptr;
     uint64_t vkey = (uint64_t)gpu_physical(addr) << 32 | size;
-    if (auto it = g.vb_cache.find(vkey); !no_vb_cache && it != g.vb_cache.end()) {
-      vbs[i] = it->second;
+    // O mesmo endereço pode ter vértices novos no mesmo submit (anéis dinâmicos da UE3): só se reutiliza a cópia se a
+    // memória convidada não tiver mudado desde então.
+    const uint64_t vhash = size ? hash_bytes(physical(addr), size) : 0;
+    auto it = g.vb_cache.find(vkey);
+    if (!no_vb_cache && it != g.vb_cache.end() && it->second.hash == vhash) {
+      vbs[i] = it->second.va;
     } else {
+      if (it != g.vb_cache.end()) g.vb_stale++;
       uint8_t* p = upload_alloc(std::max<uint32_t>(size, 16), 256, &vbs[i]);
       if (p && size) std::memcpy(p, physical(addr), size);
-      if (p) g.vb_cache[vkey] = vbs[i];
+      if (p) g.vb_cache[vkey] = {vbs[i], vhash};
     }
     sys.vb_size[i] = size;
   }
@@ -1985,15 +2020,22 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   }
   transition(bb, bb_state, D3D12_RESOURCE_STATE_PRESENT);
   submit();
-  g.swapchain->Present(0, 0);
+  g.swapchain->Present(config::get().vsync ? 1 : 0, 0);
+  if (const int fps = config::get().fps_limit; fps > 0) {
+    static auto next = std::chrono::steady_clock::now();
+    next += std::chrono::nanoseconds(1000000000ll / fps);
+    const auto now = std::chrono::steady_clock::now();
+    if (next > now) std::this_thread::sleep_until(next);
+    else next = now;
+  }
   if (g.frame % 120 == 0) {
     char title_[160];
     std::snprintf(title_, sizeof title_, "Gears of War (recompilado) - frame %llu, %u desenhos, %u resolves",
                   (unsigned long long)g.frame, g.draws, g.resolves);
     window::set_title((title_ + net::status()).c_str());
-    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs\n",
+    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos\n",
                  (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
-                 g.rts.size());
+                 g.rts.size(), (unsigned long long)g.vb_stale);
     if (g_profile && g.frame) {
       std::string line;
       char b[64];
@@ -2014,6 +2056,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     g_prof_last_swap = now;
   }
   g.draws = g.skipped = g.resolves = 0;
+  g.shader_wait_ms = 0;
   g.frame++;
   // ResolutionScale mudou no menu F8: as superfícies são recriadas no novo tamanho a partir do próximo frame.
   if (const float want = config::get().resolution_scale; want != g.scale) {
