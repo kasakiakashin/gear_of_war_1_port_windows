@@ -13,7 +13,7 @@ struct Config {
   std::string language = "English";  // ver language.cpp; aplicado ao arrancar
   float volume = 1.0f;     // 0..1
   bool vsync = false;      // sincroniza a apresentação com o monitor
-  int fps_limit = 0;       // 0 = só o limite do jogo (30)
+  int fps_limit = 60;      // 30 = ritmo do Xbox 360; 0 = ilimitado
   bool invert_y = false;   // rato: eixo Y invertido
   uint16_t keys[keybinds::kActionCount];  // VK por ação
   Config() {

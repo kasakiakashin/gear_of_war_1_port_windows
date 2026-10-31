@@ -29,6 +29,7 @@
 #include <thread>
 #include <vector>
 
+#include "config.h"
 #include "gpu/gpu.h"
 #include "gpu/renderer.h"
 #include "guest_memory.h"
@@ -240,12 +241,15 @@ void tl(const char* fmt, ...) {
 }
 
 void vblank_thread() {
-  // GOW_VBLANK_HZ: frequência do VBlank (60 por omissão); valores maiores aceleram as esperas do D3D por VBlank.
+  // O D3D do jogo espera 2 VBlanks por flip: é daí que vem o limite de 30 FPS. O VBlank só serve para esse ritmo, porque o
+  // jogo mede o tempo pelo mftb (tempo real): 120 Hz dão 60 FPS sem câmara rápida. GOW_VBLANK_HZ fixa a frequência.
   const char* e = std::getenv("GOW_VBLANK_HZ");
-  const double hz = e && std::atof(e) > 0 ? std::atof(e) : 60.0;
-  const auto period = std::chrono::microseconds((int64_t)(1e6 / hz));
+  const double forced = e ? std::atof(e) : 0.0;
   auto next = std::chrono::steady_clock::now();
   for (;;) {
+    const int limit = config::get().fps_limit;
+    const double hz = forced > 0 ? forced : limit > 0 ? limit * 2.0 : 480.0;  // 0 = ilimitado
+    const auto period = std::chrono::microseconds((int64_t)(1e6 / hz));
     next += period;
     // Dorme até ~1 ms antes e acaba com yields: o VBlank tem de cair a 16,67 ms certos (um VBlank perdido atrasa o
     // flip do D3D um VBlank inteiro).

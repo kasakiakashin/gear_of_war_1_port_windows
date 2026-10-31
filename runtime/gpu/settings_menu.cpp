@@ -37,8 +37,8 @@ constexpr UINT_PTR kTimer = 1;
 constexpr float kScales[] = {1.0f, 1.5f, 2.0f, 3.0f};
 const wchar_t* const kScaleNames[] = {L"1.0×  (720p)", L"1.5×  (1080p)", L"2.0×  (1440p)", L"3.0×  (4K)"};
 const wchar_t* const kTabNames[kTabs] = {L"VÍDEO", L"ÁUDIO E IDIOMA", L"CONTROLOS", L"MULTIPLAYER CO-OP"};
-constexpr int kFpsChoices[] = {0, 30, 24, 20};
-const wchar_t* const kFpsNames[] = {L"Sem limite extra (o jogo limita a 30)", L"30 FPS", L"24 FPS", L"20 FPS"};
+constexpr int kFpsChoices[] = {30, 60, 120, 0};
+const wchar_t* const kFpsNames[] = {L"30 FPS (como no Xbox 360)", L"60 FPS", L"120 FPS", L"Ilimitado"};
 
 constexpr COLORREF kBack = RGB(16, 15, 16), kPanel = RGB(32, 29, 30), kField = RGB(14, 13, 14), kCrimson = RGB(165, 18, 28),
                    kCrimsonHot = RGB(205, 32, 42), kButton = RGB(58, 52, 53), kText = RGB(236, 232, 230),
