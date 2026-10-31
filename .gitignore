@@ -1,0 +1,38 @@
+# Imagem de disco original (7.6 GB) e conteúdo extraído (6.3 GB): nunca versionar
+*.iso
+/Gears of War
+extracted/
+
+# Saída do gerador (tools/ppc_recomp.py regenera tudo a partir de extracted/base_image.bin, ~210 MB)
+generated_src/
+
+# Build (CMake/Ninja/Zig)
+build/
+dist/
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.pdb
+*.ilk
+
+# Dados do utilizador criados pelo runtime (saves, perfil) e capturas de frames
+user_data/
+frames/
+gow_invite.txt
+*.bmp
+
+# Logs e dumps de execução/diagnóstico (regenerados a cada ciclo)
+analysis/*.log
+!analysis/validate_phase1.log
+
+# Notas locais
+CLAUDE.md
+.claudeignore
+
+# Python
+__pycache__/
+*.pyc
+gow_config.ini
+ffmpeg/
