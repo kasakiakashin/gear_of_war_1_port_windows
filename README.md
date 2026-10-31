@@ -20,6 +20,7 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 
 - **Recompilação estática:** 2,4 milhões de instruções PowerPC (VMX/VMX128 incluído) traduzidas para C++.
 - **Direct3D 12:** resolução interna até 4K e FSR 1.0 (EASU + RCAS).
+- **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real.
 - **Tradutor de shaders Xenos:** microcódigo da GPU do Xbox 360 convertido em HLSL, com compilação em fundo e cache em disco.
 - **Co-op e Versus em System Link por túnel UDP P2P:** no menu **F8**, com um link de convite.
 - **Leitura direta da ISO:** sem extrair 6,22 GB; ficheiros soltos em `extracted/` têm prioridade (mods).
@@ -161,6 +162,7 @@ It is not an emulator and does not use the original source code.
 
 - **Static recompilation:** 2.4 million PowerPC instructions (including VMX/VMX128) translated to C++.
 - **Direct3D 12:** internal resolution up to 4K and FSR 1.0 (EASU + RCAS).
+- **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time.
 - **Xenos shader translator:** Xbox 360 GPU microcode converted to HLSL, with background compilation and a disk cache.
 - **Co-op and Versus over System Link through a P2P UDP tunnel:** in the **F8** menu, with an invite link.
 - **Direct ISO reading:** no need to extract 6.22 GB; loose files in `extracted/` take priority (mods).
