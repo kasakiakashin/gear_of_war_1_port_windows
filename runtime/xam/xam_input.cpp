@@ -218,7 +218,13 @@ void keyboard(HostGamepad& pad) {
   uint64_t sig = (uint64_t)k.buttons | (uint64_t)k.left_trigger << 16 | (uint64_t)k.right_trigger << 24 |
                  (uint64_t)(uint16_t)k.lx << 32 | (uint64_t)(uint16_t)k.ly << 48;
   sig ^= ((uint64_t)(uint16_t)k.rx << 17) ^ ((uint64_t)(uint16_t)k.ry << 41);  // o rato também muda o estado
-  if (sig != last) g_packet++, last = sig;
+  if (sig != last) {
+    g_packet++, last = sig;
+    static const bool trace = std::getenv("GOW_TRACE_INPUT") != nullptr;
+    if (trace)
+      std::fprintf(stderr, "[input] teclado/rato: botões 0x%04X LT %u RT %u L (%d, %d) R (%d, %d)\n", k.buttons, k.left_trigger,
+                   k.right_trigger, k.lx, k.ly, k.rx, k.ry);
+  }
   pad.buttons |= k.buttons;
   pad.left_trigger |= k.left_trigger;
   pad.right_trigger |= k.right_trigger;

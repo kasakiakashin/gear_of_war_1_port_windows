@@ -1,8 +1,8 @@
 // window.h — janela nativa Win32 do jogo (thread própria com o ciclo de mensagens) e comando de teclado/rato.
 //
-// Teclado/rato como comando do jogador 1, somados ao XInput (só com a janela em foco):
-//   WASD = analógico esquerdo, Espaço = A, E/F = B, C = X, Q = Y, R = RB, Shift = LB, 1/2/3/4 ou setas = direcional,
-//   Enter = Start, Backspace = Back, Ctrl = clique L3, botão do meio = clique R3, IJKL = analógico direito.
+// Teclado/rato como comando do jogador 1, somados ao XInput (só com a janela em foco); as teclas vêm do gow_config.ini
+// (keybinds.h). Por omissão: WASD = analógico esquerdo, Espaço = A, E/F = B, C = X, Q = Y, R = RB, Shift = LB,
+//   1/2/3/4 ou setas = direcional, Enter = Start, Backspace = Back, Ctrl = clique L3, botão do meio = clique R3, IJKL = analógico direito.
 //   Clicar na janela captura o rato (movimento = analógico direito, esquerdo = RT, direito = LT); Esc ou F10 soltam.
 //   Com o rato solto, Esc = B (voltar nos menus). Alt+Enter alterna o ecrã inteiro. F8 abre o menu de configurações,
 //   F9 copia o código do túnel.

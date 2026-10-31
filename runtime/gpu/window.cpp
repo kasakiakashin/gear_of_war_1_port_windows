@@ -28,7 +28,6 @@ std::atomic<bool> g_closed{false}, g_focus{false};
 std::atomic<uint32_t> g_client_w{0}, g_client_h{0};
 std::mutex g_mu;
 bool g_keys[256] = {};
-bool g_lmb = false, g_rmb = false, g_mmb = false;
 bool g_captured = false;
 float g_mouse_x = 0, g_mouse_y = 0;  // movimento pendente (píxeis): decai com o tempo na leitura
 bool g_fullscreen = false;
@@ -38,6 +37,11 @@ DWORD g_restore_style = 0;
 void update_title_hint(HWND h) {
   // O título principal é atualizado pelo renderer; aqui só a dica de captura enquanto o rato está solto.
   (void)h;
+}
+
+// Os botões do rato ficam em g_keys, nos seus VK, para poderem ser remapeados como qualquer tecla.
+void clear_mouse_buttons() {
+  for (int vk : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2}) g_keys[vk] = false;
 }
 
 void set_capture(HWND h, bool on) {
@@ -59,7 +63,7 @@ void set_capture(HWND h, bool on) {
     ClipCursor(nullptr);
     while (ShowCursor(TRUE) < 0) {
     }
-    g_lmb = g_rmb = g_mmb = false;
+    clear_mouse_buttons();
   }
   update_title_hint(h);
 }
@@ -88,6 +92,15 @@ void toggle_fullscreen(HWND h) {
   }
 }
 
+void set_mouse_buttons(WPARAM wp) {
+  const WORD s = GET_KEYSTATE_WPARAM(wp);
+  g_keys[VK_LBUTTON] = s & MK_LBUTTON;
+  g_keys[VK_RBUTTON] = s & MK_RBUTTON;
+  g_keys[VK_MBUTTON] = s & MK_MBUTTON;
+  g_keys[VK_XBUTTON1] = s & MK_XBUTTON1;
+  g_keys[VK_XBUTTON2] = s & MK_XBUTTON2;
+}
+
 LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_CLOSE:
@@ -105,7 +118,6 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       g_focus = false;
       std::lock_guard<std::mutex> lock(g_mu);
       for (bool& k : g_keys) k = false;
-      g_lmb = g_rmb = g_mmb = false;
       set_capture(h, false);
       return 0;
     }
@@ -140,26 +152,24 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
-    case WM_MBUTTONDOWN: {
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN: {
       std::lock_guard<std::mutex> lock(g_mu);
       if (menu::is_open()) return 0;
       if (!g_captured) {  // o clique que captura não dispara
         set_capture(h, true);
         return 0;
       }
-      g_lmb = (wp & MK_LBUTTON) != 0;
-      g_rmb = (wp & MK_RBUTTON) != 0;
-      g_mmb = (wp & MK_MBUTTON) != 0;
-      return 0;
+      set_mouse_buttons(wp);
+      return msg == WM_XBUTTONDOWN ? TRUE : 0;
     }
     case WM_LBUTTONUP:
     case WM_RBUTTONUP:
-    case WM_MBUTTONUP: {
+    case WM_MBUTTONUP:
+    case WM_XBUTTONUP: {
       std::lock_guard<std::mutex> lock(g_mu);
-      g_lmb = (wp & MK_LBUTTON) != 0;
-      g_rmb = (wp & MK_RBUTTON) != 0;
-      g_mmb = (wp & MK_MBUTTON) != 0;
-      return 0;
+      set_mouse_buttons(wp);
+      return msg == WM_XBUTTONUP ? TRUE : 0;
     }
     case WM_INPUT: {
       RAWINPUT ri;
@@ -287,26 +297,26 @@ bool keyboard_pad(PadState& out) {
   out = PadState{};
   if (!g_focus) return false;
   std::lock_guard<std::mutex> lock(g_mu);
-  auto k = [](int vk) { return g_keys[vk & 0xFF]; };
-  static const struct { int vk; uint16_t bit; } kMap[] = {
-      {VK_UP, 0x0001},    {'1', 0x0001},      {VK_DOWN, 0x0002},    {'3', 0x0002},  {VK_LEFT, 0x0004}, {'4', 0x0004},
-      {VK_RIGHT, 0x0008}, {'2', 0x0008},      {VK_RETURN, 0x0010},  {VK_BACK, 0x0020},
-      {VK_CONTROL, 0x0040},                   // clique L3
-      {VK_SHIFT, 0x0100},                     // LB
-      {'R', 0x0200},                          // RB (recarregar / active reload)
-      {VK_SPACE, 0x1000},                     // A (cobertura / correr)
-      {'E', 0x2000},      {'F', 0x2000},      // B (melee / serra)
-      {'C', 0x4000},                          // X
-      {'Q', 0x8000},                          // Y (ponto de interesse)
+  const config::Config& cfg = config::get();
+  auto k = [](int vk) { return vk && g_keys[vk & 0xFF]; };
+  auto act = [&](int a) { return k(cfg.keys[a]); };
+  for (int a = 0; a < keybinds::kActionCount; a++)
+    if (const uint16_t bit = keybinds::info(a).button; bit && act(a)) out.buttons |= bit;
+  // Alternativas fixas (setas no direcional, F no corpo a corpo), se a tecla não tiver sido usada noutra ação.
+  auto free_key = [&](int vk) {
+    for (uint16_t b : cfg.keys)
+      if (b == vk) return false;
+    return true;
   };
-  for (auto& m : kMap)
-    if (k(m.vk)) out.buttons |= m.bit;
+  static const struct { int vk; uint16_t bit; } kAliases[] = {
+      {VK_UP, 0x0001}, {VK_DOWN, 0x0002}, {VK_LEFT, 0x0004}, {VK_RIGHT, 0x0008}, {'F', 0x2000}};
+  for (auto& m : kAliases)
+    if (k(m.vk) && free_key(m.vk)) out.buttons |= m.bit;
   if (k(VK_ESCAPE)) out.buttons |= 0x2000;  // só chega aqui com o rato solto: voltar nos menus
-  if (g_mmb) out.buttons |= 0x0080;         // clique R3
-  out.lx = axis(k('A'), k('D'));
-  out.ly = axis(k('S'), k('W'));
-  out.rx = axis(k('J'), k('L'));
-  out.ry = axis(k('K'), k('I'));
+  out.lx = axis(act(keybinds::kMoveLeft), act(keybinds::kMoveRight));
+  out.ly = axis(act(keybinds::kMoveBack), act(keybinds::kMoveForward));
+  out.rx = axis(act(keybinds::kLookLeft), act(keybinds::kLookRight));
+  out.ry = axis(act(keybinds::kLookDown), act(keybinds::kLookUp));
   // Rato: o movimento pendente decai com uma constante de 40 ms; em regime, 1000 píxeis/s dão o analógico a fundo.
   static auto last = std::chrono::steady_clock::now();
   const auto now = std::chrono::steady_clock::now();
@@ -314,15 +324,15 @@ bool keyboard_pad(PadState& out) {
   last = now;
   if (!out.rx && !out.ry) {
     out.rx = mouse_axis(g_mouse_x);
-    out.ry = mouse_axis(-g_mouse_y);
+    out.ry = mouse_axis(cfg.invert_y ? g_mouse_y : -g_mouse_y);
   }
   const float decay = std::exp(-dt / 0.04f);
   g_mouse_x *= decay;
   g_mouse_y *= decay;
   if (std::fabs(g_mouse_x) < 0.01f) g_mouse_x = 0;
   if (std::fabs(g_mouse_y) < 0.01f) g_mouse_y = 0;
-  out.right_trigger = g_lmb ? 255 : 0;
-  out.left_trigger = g_rmb ? 255 : 0;
+  out.right_trigger = act(keybinds::kFire) ? 255 : 0;
+  out.left_trigger = act(keybinds::kAim) ? 255 : 0;
   return out.buttons || out.lx || out.ly || out.rx || out.ry || out.left_trigger || out.right_trigger;
 }
 

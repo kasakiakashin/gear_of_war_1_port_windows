@@ -6,6 +6,8 @@
 
 #include "kernel/diag.h"
 #include "kernel/kernel.h"
+#include "language.h"
+#include <cstring>
 
 using namespace kernel;
 
@@ -44,9 +46,10 @@ XBOX_IMPORT(XamLoaderGetLaunchData) {
   ret(ctx, 0);
 }
 
-XBOX_IMPORT(XGetGameRegion) { ret(ctx, 0xFFFF); }  // todas as regiões
+// Todas as regiões; o jogo só escolhe os pacotes ESM (espanhol da América Latina) com a região das Américas.
+XBOX_IMPORT(XGetGameRegion) { ret(ctx, std::strcmp(language::current().key, "SpanishLatin") == 0 ? 0x00FF : 0xFFFF); }
 XBOX_IMPORT(XGetAVPack) { ret(ctx, 6); }           // HDMI
-XBOX_IMPORT(XGetLanguage) { ret(ctx, 1); }         // inglês (igual a ExGetXConfigSetting)
+XBOX_IMPORT(XGetLanguage) { ret(ctx, language::current().xbox); }  // igual a ExGetXConfigSetting
 
 // Erro fatal de leitura do disco: na consola mostra a UI e o título termina. Aqui regista quem pediu e sai.
 XBOX_IMPORT(XamShowDirtyDiscErrorUI) {  // (DWORD UserIndex, ...) — r4 é um código interno do título

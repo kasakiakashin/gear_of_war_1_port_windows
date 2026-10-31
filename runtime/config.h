@@ -1,12 +1,24 @@
 // config.h — gow_config.ini (na pasta de trabalho), criado com os valores por omissão se não existir.
 #pragma once
 
+#include <cstdint>
 #include <string>
+
+#include "keybinds.h"
 
 namespace config {
 
 struct Config {
   std::string iso_path;  // imagem de disco do jogo (UTF-8); vazio = procurar
+  std::string language = "English";  // ver language.cpp; aplicado ao arrancar
+  float volume = 1.0f;     // 0..1
+  bool vsync = false;      // sincroniza a apresentação com o monitor
+  int fps_limit = 0;       // 0 = só o limite do jogo (30)
+  bool invert_y = false;   // rato: eixo Y invertido
+  uint16_t keys[keybinds::kActionCount];  // VK por ação
+  Config() {
+    for (int a = 0; a < keybinds::kActionCount; a++) keys[a] = keybinds::info(a).default_vk;
+  }
   float resolution_scale = 1.0f;  // resolução interna 3D: 1.0 = 720p, 1.5 = 1080p, 2.0 = 1440p, 3.0 = 4K
   bool fullscreen = false;        // sem bordas, na resolução do monitor; Alt+Enter alterna
   bool sharpening = false;        // FSR 1.0 no passe final (EASU se a saída for maior, RCAS)
@@ -21,6 +33,6 @@ struct Config {
 
 const Config& get();  // carrega na 1ª chamada
 Config& edit();       // a mesma instância, para o menu F8 (leituras noutras threads: valores simples, sem sincronização)
-void save();          // grava o IsoPath e as opções de vídeo e rato no gow_config.ini, mantendo o resto do ficheiro
+void save();          // grava as opções do menu F8 e o IsoPath no gow_config.ini, mantendo o resto do ficheiro
 
 }  // namespace config

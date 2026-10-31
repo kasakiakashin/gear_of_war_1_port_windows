@@ -19,6 +19,12 @@ const char kDefaults[] =
     "[Game]\n"
     "; Caminho da ISO do jogo. Vazio = procura um .iso na pasta do gow.exe e, se nao houver, pergunta ao abrir.\n"
     "IsoPath=\n"
+    "; Idioma: English, German, French, Spanish, SpanishLatin, Italian, Korean, Chinese. O disco nao tem Portuguese,\n"
+    "; Japanese, SimplifiedChinese, Polish nem Russian: com esses o jogo fica em ingles. Aplicado ao arrancar.\n"
+    "Language=English\n"
+    "[Audio]\n"
+    "; Volume geral, de 0.0 a 1.0.\n"
+    "Volume=1.00\n"
     "[Video]\n"
     "; Resolucao interna real da geometria 3D: 1.0 = 720p, 1.5 = 1080p, 2.0 = 1440p, 3.0 = 4K (a janela abre desse\n"
     "; tamanho, limitada ao ecra). Mais custo de GPU.\n"
@@ -29,9 +35,40 @@ const char kDefaults[] =
     "Sharpening_FSR1_CAS=0\n"
     "; Intensidade do RCAS, de 0.0 a 1.0.\n"
     "SharpeningStrength=0.5\n"
+    "; 1 = sincroniza com o monitor.\n"
+    "VSync=0\n"
+    "; Limite extra de FPS (0 = so o limite do proprio jogo, 30).\n"
+    "FpsLimit=0\n"
     "[Input]\n"
     "; Sensibilidade do rato (mira).\n"
     "MouseSensitivity=1.0\n"
+    "; 1 = eixo Y do rato invertido.\n"
+    "InvertY=0\n"
+    "; Teclas (ou Mouse1..Mouse5, Space, Enter, Shift, Ctrl, Alt, Up, F1...; None = sem tecla). Esc, F8, F9 e F10 sao fixas.\n"
+    "Key_MoveForward=W\n"
+    "Key_MoveBack=S\n"
+    "Key_MoveLeft=A\n"
+    "Key_MoveRight=D\n"
+    "Key_Fire=Mouse1\n"
+    "Key_Aim=Mouse2\n"
+    "Key_CoverRun=Space\n"
+    "Key_Melee=E\n"
+    "Key_Reload=R\n"
+    "Key_Look=Q\n"
+    "Key_Interact=C\n"
+    "Key_Tactical=Shift\n"
+    "Key_Zoom=Mouse3\n"
+    "Key_Crouch=Ctrl\n"
+    "Key_Weapon1=1\n"
+    "Key_Weapon2=2\n"
+    "Key_Weapon3=3\n"
+    "Key_Weapon4=4\n"
+    "Key_LookUp=I\n"
+    "Key_LookDown=K\n"
+    "Key_LookLeft=J\n"
+    "Key_LookRight=L\n"
+    "Key_Start=Enter\n"
+    "Key_Back=Backspace\n"
     "[Network]\n"
     "; Nome no jogo (vazio = Player).\n"
     "PlayerName=\n"
@@ -69,7 +106,17 @@ Config load() {
     if (key == "IsoPath") {
       if (val.size() >= 2 && val.front() == '"' && val.back() == '"') val = val.substr(1, val.size() - 2);
       c.iso_path = val;
-    } else if (key == "ResolutionScale") c.resolution_scale = std::clamp(f, 0.5f, 4.0f);
+    } else if (key.rfind("Key_", 0) == 0) {
+      bool known = false;
+      for (int a = 0; a < keybinds::kActionCount; a++)
+        if (key.compare(4, std::string::npos, keybinds::info(a).key) == 0) c.keys[a] = keybinds::vk_of(val), known = true;
+      if (!known) std::fprintf(stderr, "[config] chave desconhecida: %s\n", key.c_str());
+    } else if (key == "Language") c.language = val;
+    else if (key == "Volume") c.volume = std::clamp(f, 0.0f, 1.0f);
+    else if (key == "VSync") c.vsync = f != 0.0f;
+    else if (key == "FpsLimit") c.fps_limit = std::clamp((int)f, 0, 1000);
+    else if (key == "InvertY") c.invert_y = f != 0.0f;
+    else if (key == "ResolutionScale") c.resolution_scale = std::clamp(f, 0.5f, 4.0f);
     else if (key == "Fullscreen") c.fullscreen = f != 0.0f;
     else if (key == "Sharpening_FSR1_CAS") c.sharpening = f != 0.0f;
     else if (key == "SharpeningStrength") c.sharpening_strength = std::clamp(f, 0.0f, 1.0f);
@@ -105,20 +152,27 @@ void save() {
     std::snprintf(b, sizeof b, "%.2f", v);
     return std::string(b);
   };
-  const std::pair<const char*, std::string> values[] = {{"IsoPath", c.iso_path},
+  std::vector<std::pair<std::string, std::string>> values = {{"IsoPath", c.iso_path},
+                                                        {"Language", c.language},
+                                                        {"Volume", num(c.volume)},
+                                                        {"VSync", c.vsync ? "1" : "0"},
+                                                        {"FpsLimit", std::to_string(c.fps_limit)},
+                                                        {"InvertY", c.invert_y ? "1" : "0"},
                                                         {"ResolutionScale", num(c.resolution_scale)},
                                                         {"Fullscreen", c.fullscreen ? "1" : "0"},
                                                         {"Sharpening_FSR1_CAS", c.sharpening ? "1" : "0"},
                                                         {"SharpeningStrength", num(c.sharpening_strength)},
                                                         {"MouseSensitivity", num(c.mouse_sensitivity)}};
+  for (int a = 0; a < keybinds::kActionCount; a++)
+    values.push_back({std::string("Key_") + keybinds::info(a).key, keybinds::name_of(c.keys[a])});
   std::vector<std::string> lines;
   {
     std::ifstream in(kPath);
     for (std::string l; std::getline(in, l);) lines.push_back(l);
   }
   std::string out;
-  constexpr int kValues = (int)(sizeof values / sizeof values[0]);
-  bool seen[kValues] = {};
+  const int kValues = (int)values.size();
+  std::vector<char> seen(values.size(), 0);
   for (const std::string& l : lines) {
     const std::string t = trim(l);
     size_t eq = t.find('=');
@@ -134,7 +188,7 @@ void save() {
     if (!replaced) out += l + "\n";
   }
   for (int i = 0; i < kValues; i++)
-    if (!seen[i]) out += std::string(values[i].first) + "=" + values[i].second + "\n";
+    if (!seen[i]) out += values[i].first + "=" + values[i].second + "\n";
   std::ofstream(kPath) << out;
 }
 

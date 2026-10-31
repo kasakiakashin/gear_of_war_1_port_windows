@@ -3,6 +3,8 @@
 add_executable(gow
   main.cpp
   config.cpp
+  keybinds.cpp
+  language.cpp
   game_source.cpp
   guest_memory.cpp
   loader.cpp
