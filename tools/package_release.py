@@ -17,7 +17,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "0.1.0"
+DEFAULT_VERSION = "0.2.0"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
 FORBIDDEN = re.compile(r"\.(iso|xex|xxx|bik|sav|bin|pdb|log)$|^base_image|^extracted|^generated_src|^user_data", re.I)
@@ -33,11 +33,13 @@ COMO JOGAR
      ou abra o gow.exe e selecione-a quando ele perguntar (o caminho fica no gow_config.ini).
   2. Abra o gow.exe.
 
-Na 1a abertura o jogo cria aqui as pastas user_data\\ (gravacoes, perfil, cache de shaders).
+Na 1a abertura o jogo cria aqui a pasta user_data\\ (gravacoes, perfil, cache de shaders). Nas primeiras cenas
+pode haver pequenas paragens enquanto os shaders compilam; da segunda vez ja nao acontece.
 Requer Windows 10/11 de 64 bits, CPU com AVX2 e placa grafica com Direct3D 12.
 
 CONTROLOS
   Comando Xbox (XInput), ou teclado e rato:
+  Todas as teclas podem ser mudadas em F8 > Controlos. Por omissao:
   WASD = andar                    Clique = capturar o rato
   Rato = camara                   Esquerdo = disparar, Direito = mirar
   Espaco = A    E/F = B           C = X    Q = Y
@@ -46,14 +48,19 @@ CONTROLOS
   Esc ou F10 = soltar o rato
 
 ATALHOS
-  F8         Menu: resolucao, ecra inteiro, FSR, sensibilidade e Co-op pela internet
+  F8         Menu: video, audio e idioma, controlos e Co-op pela internet
   F9         Copiar o codigo de ligacao do Co-op
   Alt+Enter  Ecra inteiro
 
 CO-OP
-  Anfitriao: F8 > "Hospedar e Copiar Link", e envie o link ao amigo.
-  Convidado: copie o link, F8 > "Colar Link da Area de Transferencia e Conectar".
-  Partilhar um link revela o seu IP publico a quem o receber.
+  Anfitriao: F8 > Multiplayer Co-op > "Gerar Sala Co-op" > "Copiar Convite", e envie-o ao amigo.
+  Convidado: F8 > Multiplayer Co-op, cole o convite na caixa > "Conectar ao Amigo".
+  Depois, no menu do jogo: Campaign ou Versus > System Link > crie ou entre na sala da lista.
+  Partilhar um convite revela o seu IP publico a quem o receber.
+
+IDIOMA
+  F8 > Audio e Idioma (reiniciar para aplicar). Este disco tem ingles, alemao, frances, italiano
+  e espanhol (Espanha e America Latina). Nao tem portugues.
 
 MODS
   Crie uma pasta extracted\\ junto do gow.exe. Um ficheiro nela (ex.: extracted\\WarGame\\...)

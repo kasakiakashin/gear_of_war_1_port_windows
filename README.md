@@ -24,8 +24,10 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 - **Co-op e Versus em System Link por túnel UDP P2P:** no menu **F8**, com um link de convite.
 - **Leitura direta da ISO:** sem extrair 6,22 GB; ficheiros soltos em `extracted/` têm prioridade (mods).
 - **Som:** WASAPI, com áudio XMA descodificado pelo FFmpeg.
-- **Menu F8:** resolução, ecrã inteiro, FSR e sensibilidade, em tempo real.
-- **Entrada:** comando XInput ou teclado e rato.
+- **Menu F8 com 4 abas:** vídeo, áudio e idioma, controlos e Co-op, em tempo real.
+- **Entrada:** comando XInput ou teclado e rato, com todas as teclas remapeáveis.
+- **Idiomas do disco:** inglês, alemão, francês, italiano e espanhol (Espanha e América Latina); coreano e chinês só em
+  texto. O disco não tem português.
 
 ### Estado
 
@@ -51,7 +53,7 @@ Só é aceite a versão para a qual o código foi traduzido. O `gow.exe` compara
 
 | Tecla | Ação |
 |---|---|
-| **F8** | Menu: resolução, ecrã inteiro, FSR, sensibilidade, Co-op |
+| **F8** | Menu: vídeo, áudio e idioma, controlos, Co-op |
 | **F9** | Copiar o código de ligação do Co-op |
 | **Alt+Enter** | Ecrã inteiro |
 | WASD / rato | Andar / câmara (clique para capturar o rato; Esc ou F10 solta) |
@@ -163,8 +165,10 @@ It is not an emulator and does not use the original source code.
 - **Co-op and Versus over System Link through a P2P UDP tunnel:** in the **F8** menu, with an invite link.
 - **Direct ISO reading:** no need to extract 6.22 GB; loose files in `extracted/` take priority (mods).
 - **Sound:** WASAPI, with XMA audio decoded by FFmpeg.
-- **F8 menu:** resolution, fullscreen, FSR and sensitivity, in real time.
-- **Input:** XInput gamepad or keyboard and mouse.
+- **Four-tab F8 menu:** video, audio and language, controls and co-op, in real time.
+- **Input:** XInput gamepad or keyboard and mouse, with every key remappable.
+- **Disc languages:** English, German, French, Italian and Spanish (Spain and Latin America); Korean and Chinese are text
+  only. The disc has no Portuguese.
 
 ### Status
 
@@ -190,7 +194,7 @@ Only the version the code was translated from is accepted. `gow.exe` compares th
 
 | Key | Action |
 |---|---|
-| **F8** | Menu: resolution, fullscreen, FSR, sensitivity, co-op |
+| **F8** | Menu: video, audio and language, controls, co-op |
 | **F9** | Copy the co-op connection code |
 | **Alt+Enter** | Fullscreen |
 | WASD / mouse | Move / camera (click to capture the mouse; Esc or F10 releases it) |
