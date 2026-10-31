@@ -49,7 +49,7 @@ struct Ffmpeg {
 };
 Ffmpeg g_ff;
 bool g_ok = false;
-std::atomic<uint64_t> g_frames{0};
+std::atomic<uint64_t> g_frames{0}, g_rejected{0};
 
 HMODULE load_first(const std::string& dir, const char* prefix) {
   WIN32_FIND_DATAA fd;
@@ -210,10 +210,14 @@ void xma_decode_packet(XmaStream& s, const uint8_t* packet, uint32_t channels, u
   std::memcpy(data, packet, 2048);
   int r = f.send_packet(s.codec, f.packet);
   f.packet_unref(f.packet);
-  if (r < 0) return;  // pacote inválido: ignora
+  if (r < 0) {  // pacote inválido: ignora
+    g_rejected.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   receive(s);
 }
 
 uint64_t xma_frames() { return g_frames.load(); }
+uint64_t xma_rejected() { return g_rejected.load(); }
 
 }  // namespace apu

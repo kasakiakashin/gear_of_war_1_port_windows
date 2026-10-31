@@ -5,8 +5,10 @@
 // jogo mistura as vozes e entrega o quadro com XAudioSubmitRenderDriverFrame. É esse ritmo que faz as vozes
 // avançarem e terminarem: sem ele, sons (e o que espera por eles — cenas da UI, falas) ficam parados.
 // Aqui uma thread convidada dedicada chama a callback; os quadros entregues vão para a saída WASAPI (audio_out.cpp).
-// Com a saída ativa o ritmo é o da placa de som: chama-se a callback sempre que há menos de ~43 ms na fila. Sem
-// saída (GOW_AUDIO=0 ou sem dispositivo) usa-se um temporizador de 5,33 ms.
+// Com a saída ativa o ritmo é o da placa de som: chama-se a callback sempre que a fila tem menos do que a latência
+// pedida (~27 ms), mas nunca em rajada: o WASAPI retira ~10 ms de uma vez, e duas misturas seguidas não dariam tempo
+// ao XMA para entregar mais amostras (a voz ficava sem dados, um estalo no início do quadro). Sem saída (GOW_AUDIO=0 ou
+// sem dispositivo) usa-se um temporizador de 5,33 ms.
 //
 // XMA: ver xma.cpp.
 #define WIN32_LEAN_AND_MEAN
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 
@@ -49,11 +52,21 @@ DWORD WINAPI audio_thread(LPVOID) {
   const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(kFrameSeconds));
   uint64_t ticks = 0;
-  // Amostras estéreo na fila do WASAPI (~85 ms): folga para a mistura do jogo atrasar um frame sem falhar.
-  constexpr size_t kTargetQueued = 256 * 16;
+  static const size_t target_queued = [] {
+    const char* e = std::getenv("GOW_AUDIO_QUEUE");  // em quadros de 256 amostras
+    return (size_t)256 * (e ? (size_t)std::atoi(e) : 5);
+  }();
+  const auto min_gap = std::chrono::microseconds(3500);
+  auto last_call = std::chrono::steady_clock::now();
   for (;;) {
     if (apu::output_active()) {
-      while (apu::output_queued() >= kTargetQueued) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      for (;;) {
+        const size_t queued = apu::output_queued();
+        const bool spaced = std::chrono::steady_clock::now() - last_call >= min_gap;
+        if (queued < target_queued / 2 || (queued < target_queued && spaced)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      last_call = std::chrono::steady_clock::now();
     } else {
       next += period;
       std::this_thread::sleep_until(next);
@@ -64,9 +77,9 @@ DWORD WINAPI audio_thread(LPVOID) {
     {
       uint64_t packets, skips, starved, loops;
       apu::xma_stats(packets, skips, starved, loops);
-      std::fprintf(stderr, "[audio] %llu quadros entregues, %llu quadros XMA descodificados, %llu underruns; XMA: %llu pacotes, %llu com salto, %llu à espera de entrada, %llu voltas de loop\n",
+      std::fprintf(stderr, "[audio] %llu quadros entregues, %llu quadros XMA descodificados, %llu buracos na saída, %llu pacotes rejeitados; XMA: %llu pacotes, %llu com salto, %llu à espera de entrada, %llu voltas de loop\n",
                    (unsigned long long)g_frames_submitted.load(), (unsigned long long)apu::xma_frames(),
-                   (unsigned long long)apu::output_underruns(), (unsigned long long)packets, (unsigned long long)skips,
+                   (unsigned long long)apu::output_underruns(), (unsigned long long)apu::xma_rejected(), (unsigned long long)packets, (unsigned long long)skips,
                    (unsigned long long)starved, (unsigned long long)loops);
     }
     for (Client& c : g_clients) {

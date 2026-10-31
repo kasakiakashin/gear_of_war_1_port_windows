@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "apu/apu.h"
+#include "config.h"
 
 namespace {
 
@@ -31,6 +32,7 @@ constexpr GUID kSubtypeFloat = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0
 
 constexpr uint32_t kRate = 48000, kChannels = 2;
 constexpr size_t kRingFrames = kRate / 2;  // 0,5 s de capacidade (amostras estéreo)
+constexpr size_t kMaxQueued = kRate * 60 / 1000;  // acima disto o som deixaria de acompanhar a imagem: descarta o mais antigo
 
 std::mutex g_mu;
 std::vector<float> g_ring(kRingFrames * kChannels);
@@ -38,7 +40,7 @@ size_t g_read = 0, g_count = 0;  // em amostras estéreo
 std::atomic<bool> g_active{false};
 std::atomic<uint64_t> g_underruns{0};
 bool g_refilling = false;  // depois de esvaziar, só volta a tocar com folga: evita um crepitar de pequenos cortes
-constexpr size_t kResumeFrames = 256 * 8;
+constexpr size_t kResumeFrames = 256 * 3;
 FILE* g_dump = nullptr;
 uint32_t g_dump_bytes = 0;
 
@@ -109,7 +111,7 @@ DWORD WINAPI wasapi_thread(LPVOID) {
   fmt.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
   fmt.SubFormat = kSubtypeFloat;
   HANDLE ev = CreateEventA(nullptr, FALSE, FALSE, nullptr);
-  const REFERENCE_TIME buffer_hns = 400000;  // 40 ms
+  const REFERENCE_TIME buffer_hns = 200000;  // 20 ms
   if (SUCCEEDED(hr))
     hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                             AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
@@ -140,7 +142,7 @@ DWORD WINAPI wasapi_thread(LPVOID) {
     size_t got = pop(tmp.data(), avail);
     if (got < avail) {
       std::memset(tmp.data() + got * kChannels, 0, (avail - got) * kChannels * sizeof(float));
-      if (got == 0) g_underruns.fetch_add(1, std::memory_order_relaxed);
+      g_underruns.fetch_add(1, std::memory_order_relaxed);
     }
     std::memcpy(data, tmp.data(), avail * kChannels * sizeof(float));
     render->ReleaseBuffer(avail, 0);
@@ -186,10 +188,11 @@ void output_submit_frame(const uint8_t* be_planar6) {
     return f;
   };
   constexpr float k = 0.7071f;
+  const float volume = config::get().volume;
   for (int i = 0; i < n; i++) {
     float c = rd(2, i) * k, lfe = rd(3, i) * 0.5f;
-    float l = rd(0, i) + c + rd(4, i) * k + lfe;
-    float r = rd(1, i) + c + rd(5, i) * k + lfe;
+    float l = (rd(0, i) + c + rd(4, i) * k + lfe) * volume;
+    float r = (rd(1, i) + c + rd(5, i) * k + lfe) * volume;
     stereo[2 * i] = l < -1.f ? -1.f : l > 1.f ? 1.f : l;
     stereo[2 * i + 1] = r < -1.f ? -1.f : r > 1.f ? 1.f : r;
   }
@@ -204,7 +207,7 @@ void output_submit_frame(const uint8_t* be_planar6) {
   if (!g_active.load()) return;
   std::lock_guard<std::mutex> lock(g_mu);
   for (int i = 0; i < n; i++) {
-    if (g_count == kRingFrames) {  // cheio: descarta o mais antigo
+    if (g_count >= kMaxQueued) {
       g_read = (g_read + 1) % kRingFrames;
       g_count--;
     }

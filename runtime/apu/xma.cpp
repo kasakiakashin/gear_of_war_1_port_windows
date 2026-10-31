@@ -49,6 +49,7 @@ bool g_used[kCtxCount] = {};
 std::atomic<bool> g_enabled[kCtxCount];
 std::atomic<uint64_t> g_kicks{0};
 bool g_trace = false;
+const char* g_dump_dir = nullptr;  // GOW_XMA_DUMP_DIR: PCM de cada contexto, para análise
 uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0;
 apu::XmaStream g_streams[kCtxCount];  // estado do descodificador por contexto (host)
 
@@ -134,7 +135,22 @@ void decode(uint32_t i, Ctx& c) {
       continue;
     }
     const uint8_t* pkt = phys_ptr(c.d[5 + cur]) + packet * kPacketBytes;
+    const size_t pcm_before = s.pcm.size(), pos_before = s.pcm_pos;
     apu::xma_decode_packet(s, pkt, channels, rate);
+    if (const char* dd = g_dump_dir) {
+      char name[260];
+      std::snprintf(name, sizeof name, "%s/c%03u.pcm", dd, i);
+      if (FILE* f = std::fopen(name, "ab")) {
+        const size_t from = s.pcm.size() >= pcm_before && s.pcm_pos == pos_before ? pcm_before : 0;
+        std::fwrite(s.pcm.data() + from, 2, s.pcm.size() - from, f);
+        std::fclose(f);
+      }
+      std::snprintf(name, sizeof name, "%s/c%03u.txt", dd, i);
+      if (FILE* f = std::fopen(name, "a")) {
+        std::fprintf(f, "P %u pkt=%u cnt=%u skip=%u ch=%u rate=%u frames=%u first=%u\n", cur, packet, packet_count, pkt[3], channels, rate, pkt[0] >> 2, ((pkt[0] & 3) << 13) | (pkt[1] << 5) | (pkt[2] >> 3));
+        std::fclose(f);
+      }
+    }
     // packet_skip (último byte do cabeçalho): pacotes de outros fluxos intercalados até ao seguinte deste contexto.
     // 0xFF = não há mais pacotes deste fluxo no buffer.
     const uint32_t skip = pkt[3], next = skip == 0xFF ? packet_count : packet + 1 + skip;
@@ -221,6 +237,7 @@ void xma_stats(uint64_t& packets, uint64_t& skips, uint64_t& starved, uint64_t& 
 void xma_init() {
   apu::xma_decoder_init();
   g_trace = std::getenv("GOW_TRACE_XMA") != nullptr;
+  g_dump_dir = std::getenv("GOW_XMA_DUMP_DIR");
   g_array_va = gm::physical_alloc(kCtxSize * kCtxCount, gm::kPageReadWrite, 0, 0, 0x1000);
   g_array_phys = gm::physical_address(g_array_va);
   std::memset(phys_ptr(g_array_phys), 0, kCtxSize * kCtxCount);

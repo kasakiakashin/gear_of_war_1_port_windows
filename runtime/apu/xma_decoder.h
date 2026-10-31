@@ -23,6 +23,7 @@ void xma_reset(XmaStream& s);  // descarta estado e PCM pendente (Clear / contex
 // Descodifica um pacote e acrescenta o PCM a s.pcm. channels 1/2, rate em Hz.
 void xma_decode_packet(XmaStream& s, const uint8_t* packet, uint32_t channels, uint32_t rate);
 
+uint64_t xma_rejected();  // pacotes recusados pelo descodificador
 uint64_t xma_frames();
 
 }  // namespace apu
