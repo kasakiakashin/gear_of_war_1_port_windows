@@ -13,6 +13,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -36,7 +37,7 @@ constexpr uint32_t kStunCookie = 0x2112A442;
 constexpr size_t kHeader = 13;
 constexpr uint32_t kMaxPayload = 8192;
 constexpr int kMaxPeers = 7;
-enum Type : uint8_t { kHello = 1, kWelcome = 2, kPing = 3, kData = 4, kPunch = 5 };
+enum Type : uint8_t { kHello = 1, kWelcome = 2, kPing = 3, kData = 4, kPunch = 5, kPong = 6 };
 enum Role { kNone, kHost, kJoin };
 
 struct Endpoint {
@@ -50,7 +51,13 @@ struct Peer {
   Endpoint ep;
   uint32_t vip;
   Clock::time_point last;
+  int ping_ms = -1;
 };
+
+// PING e PONG levam os milissegundos do anfitrião; o convidado devolve-os tal como vieram.
+uint32_t now_ms() {
+  return (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
 
 struct Punch {
   Endpoint ep;
@@ -72,6 +79,8 @@ Endpoint g_host;              // convidado: o que respondeu
 Clock::time_point g_host_last;
 std::atomic<uint32_t> g_vip{kHostVip};
 std::string g_message;  // resultado da última ação do menu
+Clock::time_point g_hello_sent;
+int g_host_ping_ms = -1;  // convidado: HELLO -> WELCOME
 
 void put16(std::vector<uint8_t>& v, uint16_t x) {
   v.push_back(x >> 8);
@@ -306,9 +315,10 @@ void handle_packet(const uint8_t* p, size_t n, const Endpoint& from) {
             for (const Peer& q : g_peers)
               if (q.vip == vip) used = true, vip++;
           }
-          g_peers.push_back({from, vip, now});
+          g_peers.push_back({from, vip, now, -1});
           peer = &g_peers.back();
           std::fprintf(stderr, "[net] jogador ligado: %s = 10.77.0.%u\n", ip_str(from).c_str(), vip & 255);
+          g_message.clear();
         }
         peer->last = now;
         auto w = packet(kWelcome);
@@ -318,6 +328,10 @@ void handle_packet(const uint8_t* p, size_t n, const Endpoint& from) {
       }
       if (!peer) return;
       peer->last = now;
+      if (type == kPong && bn >= 4) {
+        peer->ping_ms = (int)(now_ms() - get32(b));
+        return;
+      }
       if (type != kData || bn < 12) return;
       src = get32(b), dst = get32(b + 4), sport = get16(b + 8), dport = get16(b + 10);
       if (src != peer->vip) return;
@@ -328,14 +342,26 @@ void handle_packet(const uint8_t* p, size_t n, const Endpoint& from) {
         if (bn < 4 || !(from == g_host_a || from == g_host_b)) return;
         uint32_t vip = get32(b);
         if ((vip & 0xFFFFFF00u) != (kHostVip & 0xFFFFFF00u)) return;
-        if (!g_host.valid()) std::fprintf(stderr, "[net] ligado ao anfitrião %s como 10.77.0.%u\n", ip_str(from).c_str(), vip & 255);
+        if (!g_host.valid()) {
+          std::fprintf(stderr, "[net] ligado ao anfitrião %s como 10.77.0.%u\n", ip_str(from).c_str(), vip & 255);
+          g_message.clear();
+        }
         g_host = from;
         g_host_last = now;
         g_vip = vip;
+        g_host_ping_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - g_hello_sent).count();
         return;
       }
       if (!g_host.valid() || !(from == g_host)) return;
       g_host_last = now;
+      if (type == kPing) {
+        if (bn >= 4) {
+          auto pong = packet(kPong);
+          put32(pong, get32(b));
+          send_raw(from, pong.data(), pong.size());
+        }
+        return;
+      }
       if (type != kData || bn < 12) return;
       src = get32(b), dst = get32(b + 4), sport = get16(b + 8), dport = get16(b + 10);
       deliver_now = dst == g_vip.load() || dst == kBroadcastVip;
@@ -352,8 +378,9 @@ void tick() {
     if (now >= g_stun_deadline || (g_public.valid() && (g_public_b.valid() || !g_stun_b.valid()))) publish_code();
     else stun_send();
   }
-  const auto hello = packet(g_role == kHost ? kPing : kHello);
+  auto hello = packet(g_role == kHost ? kPing : kHello);
   if (g_role == kHost) {
+    put32(hello, now_ms());
     for (size_t i = 0; i < g_peers.size();) {
       if (now - g_peers[i].last > std::chrono::seconds(30)) {
         std::fprintf(stderr, "[net] jogador 10.77.0.%u sem resposta: removido\n", g_peers[i].vip & 255);
@@ -371,7 +398,9 @@ void tick() {
     if (g_host.valid() && now - g_host_last > std::chrono::seconds(30)) {
       std::fprintf(stderr, "[net] anfitrião sem resposta: a tentar de novo\n");
       g_host = Endpoint{};
+      g_host_ping_ms = -1;
     }
+    g_hello_sent = now;
     if (g_host.valid()) {
       send_raw(g_host, hello.data(), hello.size());
     } else {
@@ -568,20 +597,50 @@ bool is_joined() {
   return g_role == kJoin;
 }
 
-std::string menu_status() {
+MenuState menu_state() {
   std::lock_guard<std::mutex> lock(g_mu);
-  std::string s = "Estado: ";
-  char b[96];
+  MenuState s;
+  s.message = g_message;
+  s.hosting = g_role == kHost;
+  s.joined = g_role == kJoin;
   if (g_role == kHost) {
-    std::snprintf(b, sizeof b, "anfitrião, %zu jogador(es) ligado(s).", g_peers.size());
-    s += b;
+    s.peers = (int)g_peers.size();
+    s.phase = g_peers.empty() ? MenuState::kWaiting : MenuState::kConnected;
+    for (const Peer& p : g_peers) s.ping_ms = std::max(s.ping_ms, p.ping_ms);
+    if (g_peers.empty() && s.message.empty()) s.message = "Sala criada. Envie o convite ao seu amigo.";
   } else if (g_role == kJoin) {
-    s += g_host.valid() ? "ligado ao anfitrião." : "a ligar... Se demorar, copie o código de resposta e envie-o ao anfitrião.";
-  } else {
-    s += "sem ligação.";
+    s.phase = g_host.valid() ? MenuState::kConnected : MenuState::kWaiting;
+    s.ping_ms = g_host.valid() ? g_host_ping_ms : -1;
+    s.peers = g_host.valid() ? 1 : 0;
+    if (!g_host.valid() && s.message.empty()) s.message = "A ligar... Se demorar, copie o código de resposta e envie-o ao anfitrião.";
   }
-  if (!g_message.empty()) s += "\n" + g_message;
+  if (g_role != kNone && g_stun_done) s.code = make_code();
   return s;
+}
+
+void create_room() { start_host(); }
+
+void connect_code(const std::string& text) {
+  bool ok = false;
+  const char* done = "";
+  if (text.find("gow://join/") != std::string::npos) ok = start_join(text), done = "A ligar ao anfitrião...";
+  else if (text.find("gow://peer/") != std::string::npos) ok = add_punch(text), done = "A abrir caminho até o convidado...";
+  std::lock_guard<std::mutex> lock(g_mu);
+  g_message = ok ? done : "O código não é válido para esta sessão (use gow://join/...; desligue antes de mudar de sala).";
+}
+
+void disconnect() {
+  std::lock_guard<std::mutex> lock(g_mu);
+  g_role = kNone;
+  g_peers.clear();
+  g_punch.clear();
+  g_host = g_host_a = g_host_b = Endpoint{};
+  g_host_ping_ms = -1;
+  g_token = 0;
+  g_copy_pending = false;
+  g_vip = kHostVip;
+  g_message.clear();
+  std::fprintf(stderr, "[net] túnel desligado\n");
 }
 
 std::string status() {

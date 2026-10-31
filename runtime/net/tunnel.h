@@ -28,8 +28,19 @@ void on_copy_key();
 // Colar: lê a área de transferência: gow://join/… liga-se; gow://peer/… (no anfitrião) abre caminho até esse convidado.
 void on_paste_key();
 
-// Estado para o menu F8 (UTF-8, pode ter mais do que uma linha) e se esta máquina é convidado.
-std::string menu_status();
+// Estado para o menu F8 (textos em UTF-8).
+struct MenuState {
+  enum Phase { kOff, kWaiting, kConnected } phase = kOff;
+  bool hosting = false, joined = false;
+  int peers = 0;
+  int ping_ms = -1;     // -1 = ainda sem medição
+  std::string code;     // convite (anfitrião) ou código de resposta (convidado); vazio até o STUN acabar
+  std::string message;  // resultado da última ação
+};
+MenuState menu_state();
+void create_room();                         // torna esta máquina anfitriã, sem tocar na área de transferência
+void connect_code(const std::string& text);  // gow://join/… liga-se; gow://peer/… (no anfitrião) abre caminho até esse convidado
+void disconnect();
 bool is_joined();
 
 // Texto curto para o título da janela (vazio sem túnel).
