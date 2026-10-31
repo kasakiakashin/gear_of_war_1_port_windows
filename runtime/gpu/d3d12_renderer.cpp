@@ -83,6 +83,8 @@ using PFN_D3DCompile = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADE
                                         LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
 
 struct Texture {
+  uint32_t stable = 0;  // frames seguidos com o mesmo hash completo
+  uint64_t quick = 0;   // hash do início da memória convidada
   ID3D12Resource* res = nullptr;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   uint32_t width = 0, height = 0;
@@ -149,6 +151,8 @@ struct Renderer {
   };
   std::unordered_map<uint64_t, VbCopy> vb_cache;
   uint64_t vb_stale = 0;
+  std::unordered_map<uint64_t, uint32_t> srv_tables, smp_tables;  // tabelas de descritores por conteúdo, por submit
+  uint32_t stat_submits = 0, stat_creates = 0, stat_early[3] = {};  // submits a meio do frame: upload, SRV, samplers
   int shader_wait_ms = 0;  // tempo já gasto neste frame à espera do FXC
   ID3D12DescriptorHeap *srv_heap = nullptr, *sampler_heap = nullptr, *rtv_heap = nullptr, *dsv_heap = nullptr;
   uint32_t srv_inc = 0, sampler_inc = 0, rtv_inc = 0, dsv_inc = 0;
@@ -386,6 +390,9 @@ void submit(bool wait_all = false) {
   g.list->Reset(g.allocator, nullptr);
   g.upload_offset = 0;
   g.vb_cache.clear();
+  g.srv_tables.clear();
+  g.smp_tables.clear();
+  g.stat_submits++;
   g.srv_next = 0;
   g.sampler_next = 0;
   bind_heaps();
@@ -466,6 +473,7 @@ bool create_texture(Texture& t, uint32_t w, uint32_t h, DXGI_FORMAT f, bool rend
   auto hp = heap(D3D12_HEAP_TYPE_DEFAULT);
   t.state = depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                   : render_target ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COPY_DEST;
+  g.stat_creates++;
   HRESULT hr = g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, t.state,
                                                  (render_target || depth) ? &cv : nullptr, IID_PPV_ARGS(&t.res));
   if (FAILED(hr)) {
@@ -617,12 +625,22 @@ Texture* texture_for(const TextureFetch& f) {
   Texture& t = g.textures[key];
   if (t.res && t.frame == g.frame) return &t;
   // Memória convidada igual à da última descodificação: nada a fazer (descodificar todas as texturas a cada frame
-  // custava ~26 ms/frame no pátio da prisão).
-  uint64_t raw = texture_raw_hash(gm::base(), f);
-  if (t.res && t.raw_hash == raw && t.state != D3D12_RESOURCE_STATE_COPY_DEST && !(g.trace && traced_frame())) {
+  // custava ~26 ms/frame no pátio da prisão). Uma textura sem mudanças há 30 frames só volta ao hash completo 1 frame em 16;
+  // nos outros basta a amostra do início, que apanha outra textura posta no mesmo endereço.
+  const uint64_t quick = hash_bytes(gm::base() + 0xA0000000u + (gpu_physical(f.base()) & 0x1FFFFFFFu), 256);
+  if (t.res && t.stable >= 30 && t.quick == quick && (g.frame + (uintptr_t)&t / 64) % 16 && t.state != D3D12_RESOURCE_STATE_COPY_DEST &&
+      !(g.trace && traced_frame())) {
     t.frame = g.frame;
     return &t;
   }
+  uint64_t raw = texture_raw_hash(gm::base(), f);
+  if (t.res && t.raw_hash == raw && t.state != D3D12_RESOURCE_STATE_COPY_DEST && !(g.trace && traced_frame())) {
+    t.frame = g.frame;
+    t.stable++;
+    t.quick = quick;
+    return &t;
+  }
+  t.stable = 0;
   static const uint32_t trace_tex_max = std::getenv("GOW_TRACE_MAX") ? (uint32_t)std::atoi(std::getenv("GOW_TRACE_MAX")) : 400;
   if (g.trace && traced_frame() && g.trace_lines < trace_tex_max) {
     g.trace_lines++;
@@ -648,6 +666,7 @@ Texture* texture_for(const TextureFetch& f) {
     return &g.dummy;
   t.frame = g.frame;
   t.raw_hash = raw;
+  t.quick = quick;
   if (t.hash != h || t.state == D3D12_RESOURCE_STATE_COPY_DEST) {
     t.hash = h;
     for (uint32_t l = 0; l < levels.size(); l++) upload_texture(t, levels[l], l);
@@ -661,10 +680,16 @@ Texture* render_target(uint32_t base, uint32_t xe_format, uint32_t pitch, bool d
   DXGI_FORMAT f = depth ? DXGI_FORMAT_D24_UNORM_S8_UINT : (DXGI_FORMAT)color_rt_dxgi(xe_format);
   RtKey key{base, (uint32_t)f, pitch, depth};
   Texture& t = g.rts[key];
-  uint32_t h = scaled((float)std::min<uint32_t>(std::max<uint32_t>((min_height + 15) & ~15u, kHeight), 8192));
+  // Altura pedida pela tesoura, que o jogo deixa em 8191 quando não a usa: limitada ao que cabe nos 10 MiB da EDRAM. Sem isto
+  // cada superfície podia ter 8192 linhas × escala: a 2× gastava centenas de MB, a 3× passava do limite do D3D12 (16384).
+  const bool wide = f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R16G16B16A16_UNORM || f == DXGI_FORMAT_R32G32_FLOAT;
+  const uint32_t edram_h = (10u << 20) / (pitch * (wide ? 8 : 4));
+  const uint32_t logical_h = std::min<uint32_t>(std::max<uint32_t>((min_height + 15) & ~15u, kHeight), std::max<uint32_t>(edram_h, kHeight));
+  constexpr uint32_t kMaxTexture = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+  uint32_t h = std::min(scaled((float)logical_h), kMaxTexture);
   if (t.res && t.height >= h) return &t;
   if (t.res) g.garbage.push_back(t.res), t.res = nullptr;  // recriado maior (conteúdo perdido)
-  if (!create_texture(t, scaled((float)std::min<uint32_t>(pitch, 8192)), h, f, !depth, depth)) return nullptr;
+  if (!create_texture(t, std::min(scaled((float)std::min<uint32_t>(pitch, 8192)), kMaxTexture), h, f, !depth, depth)) return nullptr;
   if (depth) g.list->ClearDepthStencilView(t.dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
   else {
     const float zero[4] = {0, 0, 0, 0};
@@ -1330,7 +1355,8 @@ void resolve() {
   }
   if (command != 3 && sx1 > sx0 && sy1 > sy0 && dest_base) {
     uint32_t w = (uint32_t)(sx1 - sx0), h = (uint32_t)(sy1 - sy0);
-    uint32_t tw = scaled((float)std::max(dest_pitch, w)), th = scaled((float)std::max(dest_height, h));
+    uint32_t tw = std::min<uint32_t>(scaled((float)std::max(dest_pitch, w)), D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+    uint32_t th = std::min<uint32_t>(scaled((float)std::max(dest_height, h)), D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION);
     FormatInfo fi = texture_format_info(dest_format);
     DXGI_FORMAT f = (DXGI_FORMAT)fi.dxgi;
     uint32_t bpp = fi.block_w == 1 ? fi.bytes_per_block : 4;
@@ -1688,8 +1714,10 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   }
   // Margem nos anéis: um submit a meio do desenho invalidaria o que já foi reservado.
   if (g.upload_offset + (96ull << 20) > kUploadSize || g.srv_next + 64 > kSrvHeapSize ||
-      g.sampler_next + 64 > kSamplerHeapSize)
+      g.sampler_next + 64 > kSamplerHeapSize) {
+    g.stat_early[g.upload_offset + (96ull << 20) > kUploadSize ? 0 : g.srv_next + 64 > kSrvHeapSize ? 1 : 2]++;
     submit();
+  }
   // Índices do convidado
   Prof pf_idx(kProfIndex);
   std::vector<uint32_t> gi(num);
@@ -1810,7 +1838,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   pf_setup.stop();
   Prof pf_desc(kProfDesc);
   // Texturas e samplers (PS)
-  uint32_t srv_base = srv_alloc(32), smp_base = sampler_alloc(32);
+  Texture* slot_tex[32];
+  D3D12_SAMPLER_DESC slot_smp[32];
   // Só os slots que o PS amostra: os restantes descritores da tabela nunca são lidos (32 SRVs + 32 samplers por
   // desenho custavam vários ms/frame).
   const uint32_t used_tex = ps ? ps->info.texture_mask : 0;
@@ -1832,7 +1861,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
       sys.tex_size[k][3] = from_resolve ? tf.height() * g.scale / t->height : 1.0f;
     }
     transition(*t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    write_srv(*t, srv_base + k);  // a swizzle da constante de fetch é aplicada no shader (xe_tswz)
+    slot_tex[k] = t;
     D3D12_SAMPLER_DESC sd{};
     bool lin = tf.mag_filter() == 1 || tf.min_filter() == 1;
     bool mip_lin = tf.mip_filter() == 1;
@@ -1842,7 +1871,35 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     sd.AddressV = address_mode(tf.clamp_y());
     sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     sd.MaxLOD = D3D12_FLOAT32_MAX;
-    g.device->CreateSampler(&sd, cpu_handle(g.sampler_heap, g.sampler_inc, smp_base + k));
+    slot_smp[k] = sd;
+  }
+  // Desenhos seguidos usam quase sempre os mesmos materiais: reaproveitam-se as tabelas de descritores deste submit. Os
+  // samplers têm chave própria porque o heap só leva 1024 por slot (32 tabelas), e havia 10 submits por frame só por isso;
+  // as combinações de filtro e endereçamento são poucas.
+  uint64_t srv_key = used_tex, smp_key = used_tex;
+  for (uint32_t k = 0; k < 32; k++) {
+    if (!(used_tex & (1u << k))) continue;
+    const D3D12_SAMPLER_DESC& sd = slot_smp[k];
+    srv_key = srv_key * 0x100000001B3ull ^ (uint64_t)(uintptr_t)slot_tex[k]->res;
+    smp_key = smp_key * 0x100000001B3ull ^ (uint64_t)sd.Filter ^ (uint64_t)sd.AddressU << 12 ^ (uint64_t)sd.AddressV << 18;
+  }
+  uint32_t srv_base, smp_base;
+  if (auto it = g.srv_tables.find(srv_key); it != g.srv_tables.end()) {
+    srv_base = it->second;
+  } else {
+    srv_base = srv_alloc(32);
+    for (uint32_t k = 0; k < 32; k++)
+      if (used_tex & (1u << k)) write_srv(*slot_tex[k], srv_base + k);  // a swizzle da constante de fetch é aplicada no shader (xe_tswz)
+    g.srv_tables[srv_key] = srv_base;
+  }
+  if (auto it = g.smp_tables.find(smp_key); it != g.smp_tables.end()) {
+    smp_base = it->second;
+  } else {
+    // Só até ao último slot usado: os seguintes da tabela nunca são lidos, e o heap é pequeno.
+    smp_base = sampler_alloc(used_tex ? 32 - (uint32_t)__builtin_clz(used_tex) : 1);
+    for (uint32_t k = 0; k < 32; k++)
+      if (used_tex & (1u << k)) g.device->CreateSampler(&slot_smp[k], cpu_handle(g.sampler_heap, g.sampler_inc, smp_base + k));
+    g.smp_tables[smp_key] = smp_base;
   }
   if (g.dummy.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) transition(g.dummy, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
   // Buffers de vértices
@@ -1858,8 +1915,14 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     static const bool no_vb_cache = std::getenv("GOW_NO_VB_CACHE") != nullptr;
     uint64_t vkey = (uint64_t)gpu_physical(addr) << 32 | size;
     // O mesmo endereço pode ter vértices novos no mesmo submit (anéis dinâmicos da UE3): só se reutiliza a cópia se a
-    // memória convidada não tiver mudado desde então.
-    const uint64_t vhash = size ? hash_bytes(physical(addr), size) : 0;
+    // memória convidada não tiver mudado. Amostra de início, meio e fim: um hash completo por desenho custava 14 ms/frame
+    // (buffers estáticos de vários MB partilhados por centenas de desenhos).
+    uint64_t vhash = 0;
+    if (size) {
+      const uint8_t* vp = physical(addr);
+      const uint32_t n = std::min<uint32_t>(size, 512);
+      vhash = hash_bytes(vp, n) ^ hash_bytes(vp + (size - n) / 2, n) * 3 ^ hash_bytes(vp + size - n, n) * 5;
+    }
     auto it = g.vb_cache.find(vkey);
     if (!no_vb_cache && it != g.vb_cache.end() && it->second.hash == vhash) {
       vbs[i] = it->second.va;
@@ -2021,21 +2084,16 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   transition(bb, bb_state, D3D12_RESOURCE_STATE_PRESENT);
   submit();
   g.swapchain->Present(config::get().vsync ? 1 : 0, 0);
-  if (const int fps = config::get().fps_limit; fps > 0) {
-    static auto next = std::chrono::steady_clock::now();
-    next += std::chrono::nanoseconds(1000000000ll / fps);
-    const auto now = std::chrono::steady_clock::now();
-    if (next > now) std::this_thread::sleep_until(next);
-    else next = now;
-  }
   if (g.frame % 120 == 0) {
     char title_[160];
     std::snprintf(title_, sizeof title_, "Gears of War (recompilado) - frame %llu, %u desenhos, %u resolves",
                   (unsigned long long)g.frame, g.draws, g.resolves);
     window::set_title((title_ + net::status()).c_str());
-    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos\n",
+    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames\n",
                  (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
-                 g.rts.size(), (unsigned long long)g.vb_stale);
+                 g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates);
+    g.stat_submits = g.stat_creates = 0;
+    g.stat_early[0] = g.stat_early[1] = g.stat_early[2] = 0;
     if (g_profile && g.frame) {
       std::string line;
       char b[64];
