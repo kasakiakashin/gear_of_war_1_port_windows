@@ -1,0 +1,29 @@
+== ISO extraction
+  [PASS] all manifest files present - 1810 files, 0 missing
+  [PASS] all file sizes match - 0 mismatched
+  [PASS] total bytes match - 6,694,349,116 bytes
+  [PASS] byte-exact spot check vs ISO - 41 files sampled, 0 differ
+== Unreal Engine 3 content
+     extensions: .xxx=1745, .sav=33, .bik=14, .txt=7, <none>=1, .ini=1, .chi=1, .deu=1, .esm=1, .esn=1, .fra=1, .int=1, .ita=1, .kor=1, .xex=1
+  [PASS] UE3 packages (*.xxx): BE tag 0x9E2A83C1 or compressed-chunk header - 1745 packages: 1732 plain (file version/licensee 374/0), 13 fully compressed (Core.xxx, Engine.xxx, GameFramework.xxx, OnlineSubsystemLive.xxx, UnrealScriptTest.xxx, VinceOnlineSubsystemLive.xxx, WarfareGame.xxx, WarfareGame_LOC_deu.xxx, WarfareGame_LOC_esm.xxx, WarfareGame_LOC_esn.xxx, WarfareGame_LOC_fra.xxx, WarfareGame_LOC_int.xxx, WarfareGame_LOC_ita.xxx), 0 bad
+  [PASS] Bink movies start with 'BIK' - 14 movies
+  [PASS] Coalesced localisation files present - Coalesced.chi, Coalesced.deu, Coalesced.esm, Coalesced.esn, Coalesced.fra, Coalesced.ini, Coalesced.int, Coalesced.ita, Coalesced.kor
+  [PASS] Xbox360TOC.txt parsed - 1812 entries
+== base_image.bin
+  [PASS] base image size == XEX image size - 0xCE0000
+  [PASS] sha1 matches binary_map.json
+  [PASS] PE machine is PowerPC BE (0x1F2)
+  [PASS] PE entry == XEX entry - 0x82612BF0
+  [PASS] .pdata entries sorted & 4-aligned - 25239 functions
+  [PASS] .pdata entries inside code sections
+  [PASS] .pdata functions do not overlap - 0 overlaps
+  [PASS] entry point is a .pdata function start
+  [PASS] many functions begin with 'mflr r12' (0x7D8802A6) - 23745/25239 (94.1%)
+  [PASS] .text decodes as PowerPC (invalid primary opcodes < 0.5%) - 2448377 words, 6136 with invalid primary opcode, 20946 blr
+  [PASS] XEX page SHA-1 chain matches decoded image - 206 descriptors x 64 KiB pages
+  [PASS] title resource is an XDBF database - 4D5307D5@0x82C1F780
+  [PASS] import records decode to (type<<24|lib<<16|ordinal) - 462 records
+  [PASS] import library summary - xam.xex: 92f/0v; xboxkrnl.exe: 134f/10v
+  [PASS] UE3 strings present in image - Unreal@0x82055541, WarGame@0x82136A9E, Engine.@0x82CD0296
+
+23/23 checks passed

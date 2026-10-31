@@ -1,0 +1,2367 @@
+{
+ "source": "Xenia export tables (BSD), cruzadas com binary_map.json",
+ "type_mismatches": [],
+ "unnamed": [],
+ "imports": [
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 1,
+   "ordinal_hex": "0x0001",
+   "name": "NetDll_WSAStartup",
+   "type": "function",
+   "thunk_address": "0x82AC6C14",
+   "variable_address": "0x820006EC"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 2,
+   "ordinal_hex": "0x0002",
+   "name": "NetDll_WSACleanup",
+   "type": "function",
+   "thunk_address": "0x82AC6C24",
+   "variable_address": "0x820006E8"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 3,
+   "ordinal_hex": "0x0003",
+   "name": "NetDll_socket",
+   "type": "function",
+   "thunk_address": "0x82AC6C34",
+   "variable_address": "0x820006E4"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 4,
+   "ordinal_hex": "0x0004",
+   "name": "NetDll_closesocket",
+   "type": "function",
+   "thunk_address": "0x82AC6C44",
+   "variable_address": "0x820006E0"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 6,
+   "ordinal_hex": "0x0006",
+   "name": "NetDll_ioctlsocket",
+   "type": "function",
+   "thunk_address": "0x82AC6C54",
+   "variable_address": "0x820006DC"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 7,
+   "ordinal_hex": "0x0007",
+   "name": "NetDll_setsockopt",
+   "type": "function",
+   "thunk_address": "0x82AC6C64",
+   "variable_address": "0x820006D8"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 8,
+   "ordinal_hex": "0x0008",
+   "name": "NetDll_getsockopt",
+   "type": "function",
+   "thunk_address": "0x82AC6C74",
+   "variable_address": "0x820006D4"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 9,
+   "ordinal_hex": "0x0009",
+   "name": "NetDll_getsockname",
+   "type": "function",
+   "thunk_address": "0x82AC6C84",
+   "variable_address": "0x820006D0"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 11,
+   "ordinal_hex": "0x000B",
+   "name": "NetDll_bind",
+   "type": "function",
+   "thunk_address": "0x82AC6C94",
+   "variable_address": "0x820006CC"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 12,
+   "ordinal_hex": "0x000C",
+   "name": "NetDll_connect",
+   "type": "function",
+   "thunk_address": "0x82AC6CA4",
+   "variable_address": "0x820006C8"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 18,
+   "ordinal_hex": "0x0012",
+   "name": "NetDll_recv",
+   "type": "function",
+   "thunk_address": "0x82AC6CB4",
+   "variable_address": "0x820006C4"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 20,
+   "ordinal_hex": "0x0014",
+   "name": "NetDll_recvfrom",
+   "type": "function",
+   "thunk_address": "0x82AC6CC4",
+   "variable_address": "0x820006C0"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 22,
+   "ordinal_hex": "0x0016",
+   "name": "NetDll_send",
+   "type": "function",
+   "thunk_address": "0x82AC6CD4",
+   "variable_address": "0x820006BC"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 24,
+   "ordinal_hex": "0x0018",
+   "name": "NetDll_sendto",
+   "type": "function",
+   "thunk_address": "0x82AC6CE4",
+   "variable_address": "0x820006B8"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 26,
+   "ordinal_hex": "0x001A",
+   "name": "NetDll_inet_addr",
+   "type": "function",
+   "thunk_address": "0x82AC6CF4",
+   "variable_address": "0x820006B4"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 27,
+   "ordinal_hex": "0x001B",
+   "name": "NetDll_WSAGetLastError",
+   "type": "function",
+   "thunk_address": "0x82AC6D04",
+   "variable_address": "0x820006B0"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 29,
+   "ordinal_hex": "0x001D",
+   "name": "NetDll_WSACreateEvent",
+   "type": "function",
+   "thunk_address": "0x82AC6D14",
+   "variable_address": "0x820006AC"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 51,
+   "ordinal_hex": "0x0033",
+   "name": "NetDll_XNetStartup",
+   "type": "function",
+   "thunk_address": "0x82AC6904",
+   "variable_address": "0x82000750"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 52,
+   "ordinal_hex": "0x0034",
+   "name": "NetDll_XNetCleanup",
+   "type": "function",
+   "thunk_address": "0x82AC6914",
+   "variable_address": "0x82000754"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 53,
+   "ordinal_hex": "0x0035",
+   "name": "NetDll_XNetRandom",
+   "type": "function",
+   "thunk_address": "0x82AC6924",
+   "variable_address": "0x82000758"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 54,
+   "ordinal_hex": "0x0036",
+   "name": "NetDll_XNetCreateKey",
+   "type": "function",
+   "thunk_address": "0x82AC6934",
+   "variable_address": "0x8200075C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 55,
+   "ordinal_hex": "0x0037",
+   "name": "NetDll_XNetRegisterKey",
+   "type": "function",
+   "thunk_address": "0x82AC6944",
+   "variable_address": "0x82000760"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 56,
+   "ordinal_hex": "0x0038",
+   "name": "NetDll_XNetUnregisterKey",
+   "type": "function",
+   "thunk_address": "0x82AC6954",
+   "variable_address": "0x82000764"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 57,
+   "ordinal_hex": "0x0039",
+   "name": "NetDll_XNetXnAddrToInAddr",
+   "type": "function",
+   "thunk_address": "0x82AC6964",
+   "variable_address": "0x82000768"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 67,
+   "ordinal_hex": "0x0043",
+   "name": "NetDll_XNetDnsLookup",
+   "type": "function",
+   "thunk_address": "0x82AC6974",
+   "variable_address": "0x8200076C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 68,
+   "ordinal_hex": "0x0044",
+   "name": "NetDll_XNetDnsRelease",
+   "type": "function",
+   "thunk_address": "0x82AC6984",
+   "variable_address": "0x8200074C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 69,
+   "ordinal_hex": "0x0045",
+   "name": "NetDll_XNetQosListen",
+   "type": "function",
+   "thunk_address": "0x82AC6994",
+   "variable_address": "0x82000748"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 70,
+   "ordinal_hex": "0x0046",
+   "name": "NetDll_XNetQosLookup",
+   "type": "function",
+   "thunk_address": "0x82AC69A4",
+   "variable_address": "0x82000744"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 72,
+   "ordinal_hex": "0x0048",
+   "name": "NetDll_XNetQosRelease",
+   "type": "function",
+   "thunk_address": "0x82AC69B4",
+   "variable_address": "0x82000740"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 73,
+   "ordinal_hex": "0x0049",
+   "name": "NetDll_XNetGetTitleXnAddr",
+   "type": "function",
+   "thunk_address": "0x82AC69C4",
+   "variable_address": "0x8200073C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 74,
+   "ordinal_hex": "0x004A",
+   "name": "NetDll_XNetGetDebugXnAddr",
+   "type": "function",
+   "thunk_address": "0x82AC69D4",
+   "variable_address": "0x82000738"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 75,
+   "ordinal_hex": "0x004B",
+   "name": "NetDll_XNetGetEthernetLinkStatus",
+   "type": "function",
+   "thunk_address": "0x82AC69E4",
+   "variable_address": "0x82000734"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 310,
+   "ordinal_hex": "0x0136",
+   "name": "XNetLogonGetTitleID",
+   "type": "function",
+   "thunk_address": "0x82AC6D74",
+   "variable_address": "0x82000694"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 400,
+   "ordinal_hex": "0x0190",
+   "name": "XamInputGetCapabilities",
+   "type": "function",
+   "thunk_address": "0x82AC6314",
+   "variable_address": "0x82000654"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 401,
+   "ordinal_hex": "0x0191",
+   "name": "XamInputGetState",
+   "type": "function",
+   "thunk_address": "0x82AC6324",
+   "variable_address": "0x82000658"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 402,
+   "ordinal_hex": "0x0192",
+   "name": "XamInputSetState",
+   "type": "function",
+   "thunk_address": "0x82AC6334",
+   "variable_address": "0x8200065C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 420,
+   "ordinal_hex": "0x01A4",
+   "name": "XamLoaderLaunchTitle",
+   "type": "function",
+   "thunk_address": "0x82AC6AF4",
+   "variable_address": "0x820006F0"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 423,
+   "ordinal_hex": "0x01A7",
+   "name": "XamLoaderGetLaunchDataSize",
+   "type": "function",
+   "thunk_address": "0x82AC61C4",
+   "variable_address": "0x82000600"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 424,
+   "ordinal_hex": "0x01A8",
+   "name": "XamLoaderGetLaunchData",
+   "type": "function",
+   "thunk_address": "0x82AC61D4",
+   "variable_address": "0x82000604"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 425,
+   "ordinal_hex": "0x01A9",
+   "name": "XamLoaderTerminateTitle",
+   "type": "function",
+   "thunk_address": "0x82AC6374",
+   "variable_address": "0x8200066C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 490,
+   "ordinal_hex": "0x01EA",
+   "name": "XamAlloc",
+   "type": "function",
+   "thunk_address": "0x82AC6D44",
+   "variable_address": "0x820006A0"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 492,
+   "ordinal_hex": "0x01EC",
+   "name": "XamFree",
+   "type": "function",
+   "thunk_address": "0x82AC6D34",
+   "variable_address": "0x820006A4"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 500,
+   "ordinal_hex": "0x01F4",
+   "name": "XMsgInProcessCall",
+   "type": "function",
+   "thunk_address": "0x82AC6D24",
+   "variable_address": "0x820006A8"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 503,
+   "ordinal_hex": "0x01F7",
+   "name": "XMsgStartIORequest",
+   "type": "function",
+   "thunk_address": "0x82AC6274",
+   "variable_address": "0x8200062C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 504,
+   "ordinal_hex": "0x01F8",
+   "name": "XMsgCancelIORequest",
+   "type": "function",
+   "thunk_address": "0x82AC6DD4",
+   "variable_address": "0x8200067C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 508,
+   "ordinal_hex": "0x01FC",
+   "name": "XMsgStartIORequestEx",
+   "type": "function",
+   "thunk_address": "0x82AC6DA4",
+   "variable_address": "0x82000688"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 522,
+   "ordinal_hex": "0x020A",
+   "name": "XamUserGetXUID",
+   "type": "function",
+   "thunk_address": "0x82AC62F4",
+   "variable_address": "0x8200064C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 526,
+   "ordinal_hex": "0x020E",
+   "name": "XamUserGetName",
+   "type": "function",
+   "thunk_address": "0x82AC6284",
+   "variable_address": "0x82000630"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 528,
+   "ordinal_hex": "0x0210",
+   "name": "XamUserGetSigninState",
+   "type": "function",
+   "thunk_address": "0x82AC6294",
+   "variable_address": "0x82000634"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 530,
+   "ordinal_hex": "0x0212",
+   "name": "XamUserCheckPrivilege",
+   "type": "function",
+   "thunk_address": "0x82AC62B4",
+   "variable_address": "0x8200063C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 531,
+   "ordinal_hex": "0x0213",
+   "name": "XamUserAreUsersFriends",
+   "type": "function",
+   "thunk_address": "0x82AC62A4",
+   "variable_address": "0x82000638"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 537,
+   "ordinal_hex": "0x0219",
+   "name": "XamUserReadProfileSettings",
+   "type": "function",
+   "thunk_address": "0x82AC6D54",
+   "variable_address": "0x8200069C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 538,
+   "ordinal_hex": "0x021A",
+   "name": "XamUserWriteProfileSettings",
+   "type": "function",
+   "thunk_address": "0x82AC6D64",
+   "variable_address": "0x82000698"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 592,
+   "ordinal_hex": "0x0250",
+   "name": "XamEnumerate",
+   "type": "function",
+   "thunk_address": "0x82AC6304",
+   "variable_address": "0x82000650"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 601,
+   "ordinal_hex": "0x0259",
+   "name": "XamContentCreateEx",
+   "type": "function",
+   "thunk_address": "0x82AC6204",
+   "variable_address": "0x82000610"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 602,
+   "ordinal_hex": "0x025A",
+   "name": "XamContentClose",
+   "type": "function",
+   "thunk_address": "0x82AC6224",
+   "variable_address": "0x82000618"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 603,
+   "ordinal_hex": "0x025B",
+   "name": "XamContentDelete",
+   "type": "function",
+   "thunk_address": "0x82AC6214",
+   "variable_address": "0x82000614"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 604,
+   "ordinal_hex": "0x025C",
+   "name": "XamContentCreateEnumerator",
+   "type": "function",
+   "thunk_address": "0x82AC6244",
+   "variable_address": "0x82000620"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 606,
+   "ordinal_hex": "0x025E",
+   "name": "XamContentGetDeviceData",
+   "type": "function",
+   "thunk_address": "0x82AC6264",
+   "variable_address": "0x82000628"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 610,
+   "ordinal_hex": "0x0262",
+   "name": "XamContentGetCreator",
+   "type": "function",
+   "thunk_address": "0x82AC6234",
+   "variable_address": "0x8200061C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 613,
+   "ordinal_hex": "0x0265",
+   "name": "XamContentGetDeviceState",
+   "type": "function",
+   "thunk_address": "0x82AC6254",
+   "variable_address": "0x82000624"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 640,
+   "ordinal_hex": "0x0280",
+   "name": "XamGetExecutionId",
+   "type": "function",
+   "thunk_address": "0x82AC6384",
+   "variable_address": "0x82000670"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 642,
+   "ordinal_hex": "0x0282",
+   "name": "XamGetSystemVersion",
+   "type": "function",
+   "thunk_address": "0x82AC62C4",
+   "variable_address": "0x82000640"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 650,
+   "ordinal_hex": "0x028A",
+   "name": "XamNotifyCreateListener",
+   "type": "function",
+   "thunk_address": "0x82AC6AE4",
+   "variable_address": "0x820006F4"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 651,
+   "ordinal_hex": "0x028B",
+   "name": "XNotifyGetNext",
+   "type": "function",
+   "thunk_address": "0x82AC69F4",
+   "variable_address": "0x82000730"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 652,
+   "ordinal_hex": "0x028C",
+   "name": "XNotifyPositionUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A04",
+   "variable_address": "0x8200072C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 700,
+   "ordinal_hex": "0x02BC",
+   "name": "XamShowSigninUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A14",
+   "variable_address": "0x82000728"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 703,
+   "ordinal_hex": "0x02BF",
+   "name": "XamShowFriendsUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A24",
+   "variable_address": "0x82000724"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 704,
+   "ordinal_hex": "0x02C0",
+   "name": "XamShowMessagesUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A44",
+   "variable_address": "0x8200071C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 705,
+   "ordinal_hex": "0x02C1",
+   "name": "XamShowKeyboardUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A54",
+   "variable_address": "0x82000718"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 709,
+   "ordinal_hex": "0x02C5",
+   "name": "XamShowAchievementsUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A74",
+   "variable_address": "0x82000710"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 710,
+   "ordinal_hex": "0x02C6",
+   "name": "XamShowPlayerReviewUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A84",
+   "variable_address": "0x8200070C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 711,
+   "ordinal_hex": "0x02C7",
+   "name": "XamShowMarketplaceUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A94",
+   "variable_address": "0x82000708"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 712,
+   "ordinal_hex": "0x02C8",
+   "name": "XamShowPlayersUI",
+   "type": "function",
+   "thunk_address": "0x82AC6A34",
+   "variable_address": "0x82000720"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 715,
+   "ordinal_hex": "0x02CB",
+   "name": "XamShowDeviceSelectorUI",
+   "type": "function",
+   "thunk_address": "0x82AC6AA4",
+   "variable_address": "0x82000704"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 717,
+   "ordinal_hex": "0x02CD",
+   "name": "XamShowGameInviteUI",
+   "type": "function",
+   "thunk_address": "0x82AC6AB4",
+   "variable_address": "0x82000700"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 718,
+   "ordinal_hex": "0x02CE",
+   "name": "XamShowFriendRequestUI",
+   "type": "function",
+   "thunk_address": "0x82AC6AC4",
+   "variable_address": "0x820006FC"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 725,
+   "ordinal_hex": "0x02D5",
+   "name": "XamShowGamerCardUIForXUID",
+   "type": "function",
+   "thunk_address": "0x82AC6A64",
+   "variable_address": "0x82000714"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 729,
+   "ordinal_hex": "0x02D9",
+   "name": "XamShowDirtyDiscErrorUI",
+   "type": "function",
+   "thunk_address": "0x82AC6AD4",
+   "variable_address": "0x820006F8"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 732,
+   "ordinal_hex": "0x02DC",
+   "name": "XamShowMessageBoxUIEx",
+   "type": "function",
+   "thunk_address": "0x82AC6344",
+   "variable_address": "0x82000660"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 752,
+   "ordinal_hex": "0x02F0",
+   "name": "XamWriteGamerTile",
+   "type": "function",
+   "thunk_address": "0x82AC62E4",
+   "variable_address": "0x82000648"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 759,
+   "ordinal_hex": "0x02F7",
+   "name": "XamUserCreateStatsEnumerator",
+   "type": "function",
+   "thunk_address": "0x82AC62D4",
+   "variable_address": "0x82000644"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 780,
+   "ordinal_hex": "0x030C",
+   "name": "XamVoiceCreate",
+   "type": "function",
+   "thunk_address": "0x82AC6DF4",
+   "variable_address": "0x82000674"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 781,
+   "ordinal_hex": "0x030D",
+   "name": "XamVoiceHeadsetPresent",
+   "type": "function",
+   "thunk_address": "0x82AC6DB4",
+   "variable_address": "0x82000684"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 782,
+   "ordinal_hex": "0x030E",
+   "name": "XamVoiceSubmitPacket",
+   "type": "function",
+   "thunk_address": "0x82AC6DE4",
+   "variable_address": "0x82000678"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 783,
+   "ordinal_hex": "0x030F",
+   "name": "XamVoiceClose",
+   "type": "function",
+   "thunk_address": "0x82AC6DC4",
+   "variable_address": "0x82000680"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 790,
+   "ordinal_hex": "0x0316",
+   "name": "XamSessionCreateHandle",
+   "type": "function",
+   "thunk_address": "0x82AC6D94",
+   "variable_address": "0x8200068C"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 791,
+   "ordinal_hex": "0x0317",
+   "name": "XamSessionRefObjByHandle",
+   "type": "function",
+   "thunk_address": "0x82AC6D84",
+   "variable_address": "0x82000690"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 971,
+   "ordinal_hex": "0x03CB",
+   "name": "XGetAVPack",
+   "type": "function",
+   "thunk_address": "0x82AC6364",
+   "variable_address": "0x82000668"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 972,
+   "ordinal_hex": "0x03CC",
+   "name": "XGetGameRegion",
+   "type": "function",
+   "thunk_address": "0x82AC61E4",
+   "variable_address": "0x82000608"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 973,
+   "ordinal_hex": "0x03CD",
+   "name": "XGetLanguage",
+   "type": "function",
+   "thunk_address": "0x82AC6354",
+   "variable_address": "0x82000664"
+  },
+  {
+   "lib": "xam.xex",
+   "lib_index": 0,
+   "ordinal": 977,
+   "ordinal_hex": "0x03D1",
+   "name": "XGetVideoMode",
+   "type": "function",
+   "thunk_address": "0x82AC61F4",
+   "variable_address": "0x8200060C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 1,
+   "ordinal_hex": "0x0001",
+   "name": "DbgBreakPoint",
+   "type": "function",
+   "thunk_address": "0x82AC6BE4",
+   "variable_address": "0x82000834"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 3,
+   "ordinal_hex": "0x0003",
+   "name": "DbgPrint",
+   "type": "function",
+   "thunk_address": "0x82AC64F4",
+   "variable_address": "0x820008DC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 9,
+   "ordinal_hex": "0x0009",
+   "name": "ExAllocatePool",
+   "type": "function",
+   "thunk_address": "0x82AC6BD4",
+   "variable_address": "0x82000830"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 13,
+   "ordinal_hex": "0x000D",
+   "name": "ExCreateThread",
+   "type": "function",
+   "thunk_address": "0x82AC67F4",
+   "variable_address": "0x820007B8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 15,
+   "ordinal_hex": "0x000F",
+   "name": "ExFreePool",
+   "type": "function",
+   "thunk_address": "0x82AC6BC4",
+   "variable_address": "0x8200082C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 16,
+   "ordinal_hex": "0x0010",
+   "name": "ExGetXConfigSetting",
+   "type": "function",
+   "thunk_address": "0x82AC6474",
+   "variable_address": "0x82000900"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 21,
+   "ordinal_hex": "0x0015",
+   "name": "ExRegisterTitleTerminateNotification",
+   "type": "function",
+   "thunk_address": "0x82AC67C4",
+   "variable_address": "0x820007C4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 25,
+   "ordinal_hex": "0x0019",
+   "name": "ExTerminateThread",
+   "type": "function",
+   "thunk_address": "0x82AC6BF4",
+   "variable_address": "0x8200083C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 27,
+   "ordinal_hex": "0x001B",
+   "name": "ExThreadObjectType",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x820008B0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 33,
+   "ordinal_hex": "0x0021",
+   "name": "FscSetCacheElementCount",
+   "type": "function",
+   "thunk_address": "0x82AC6BB4",
+   "variable_address": "0x82000828"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 40,
+   "ordinal_hex": "0x0028",
+   "name": "HalReturnToFirmware",
+   "type": "function",
+   "thunk_address": "0x82AC65E4",
+   "variable_address": "0x82000894"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 43,
+   "ordinal_hex": "0x002B",
+   "name": "InterlockedFlushSList",
+   "type": "function",
+   "thunk_address": "0x82AC6FC4",
+   "variable_address": "0x820009AC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 44,
+   "ordinal_hex": "0x002C",
+   "name": "InterlockedPopEntrySList",
+   "type": "function",
+   "thunk_address": "0x82AC6FD4",
+   "variable_address": "0x820009B0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 77,
+   "ordinal_hex": "0x004D",
+   "name": "KeAcquireSpinLockAtRaisedIrql",
+   "type": "function",
+   "thunk_address": "0x82AC66D4",
+   "variable_address": "0x82000854"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 82,
+   "ordinal_hex": "0x0052",
+   "name": "KeBugCheck",
+   "type": "function",
+   "thunk_address": "0x82AC6EE4",
+   "variable_address": "0x82000974"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 83,
+   "ordinal_hex": "0x0053",
+   "name": "KeBugCheckEx",
+   "type": "function",
+   "thunk_address": "0x82AC6604",
+   "variable_address": "0x8200088C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 89,
+   "ordinal_hex": "0x0059",
+   "name": "KeDebugMonitorData",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x820008A4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 90,
+   "ordinal_hex": "0x005A",
+   "name": "KeDelayExecutionThread",
+   "type": "function",
+   "thunk_address": "0x82AC6564",
+   "variable_address": "0x820008C0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 93,
+   "ordinal_hex": "0x005D",
+   "name": "KeEnableFpuExceptions",
+   "type": "function",
+   "thunk_address": "0x82AC6EF4",
+   "variable_address": "0x82000978"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 95,
+   "ordinal_hex": "0x005F",
+   "name": "KeEnterCriticalRegion",
+   "type": "function",
+   "thunk_address": "0x82AC6864",
+   "variable_address": "0x8200079C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 102,
+   "ordinal_hex": "0x0066",
+   "name": "KeGetCurrentProcessType",
+   "type": "function",
+   "thunk_address": "0x82AC6614",
+   "variable_address": "0x82000888"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 107,
+   "ordinal_hex": "0x006B",
+   "name": "KeLockL2",
+   "type": "function",
+   "thunk_address": "0x82AC6804",
+   "variable_address": "0x820007B4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 108,
+   "ordinal_hex": "0x006C",
+   "name": "KeUnlockL2",
+   "type": "function",
+   "thunk_address": "0x82AC6814",
+   "variable_address": "0x820007B0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 116,
+   "ordinal_hex": "0x0074",
+   "name": "KeInitializeSemaphore",
+   "type": "function",
+   "thunk_address": "0x82AC6E54",
+   "variable_address": "0x82000950"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 125,
+   "ordinal_hex": "0x007D",
+   "name": "KeLeaveCriticalRegion",
+   "type": "function",
+   "thunk_address": "0x82AC6854",
+   "variable_address": "0x820007A0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 131,
+   "ordinal_hex": "0x0083",
+   "name": "KeQueryPerformanceFrequency",
+   "type": "function",
+   "thunk_address": "0x82AC6B14",
+   "variable_address": "0x82000800"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 132,
+   "ordinal_hex": "0x0084",
+   "name": "KeQuerySystemTime",
+   "type": "function",
+   "thunk_address": "0x82AC6BA4",
+   "variable_address": "0x82000824"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 133,
+   "ordinal_hex": "0x0085",
+   "name": "KeRaiseIrqlToDpcLevel",
+   "type": "function",
+   "thunk_address": "0x82AC6E04",
+   "variable_address": "0x8200093C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 136,
+   "ordinal_hex": "0x0088",
+   "name": "KeReleaseSemaphore",
+   "type": "function",
+   "thunk_address": "0x82AC6E74",
+   "variable_address": "0x82000958"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 137,
+   "ordinal_hex": "0x0089",
+   "name": "KeReleaseSpinLockFromRaisedIrql",
+   "type": "function",
+   "thunk_address": "0x82AC66A4",
+   "variable_address": "0x82000860"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 143,
+   "ordinal_hex": "0x008F",
+   "name": "KeResetEvent",
+   "type": "function",
+   "thunk_address": "0x82AC67D4",
+   "variable_address": "0x820007C0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 146,
+   "ordinal_hex": "0x0092",
+   "name": "KeResumeThread",
+   "type": "function",
+   "thunk_address": "0x82AC6E44",
+   "variable_address": "0x8200094C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 151,
+   "ordinal_hex": "0x0097",
+   "name": "KeSetAffinityThread",
+   "type": "function",
+   "thunk_address": "0x82AC65B4",
+   "variable_address": "0x820008A8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 153,
+   "ordinal_hex": "0x0099",
+   "name": "KeSetBasePriorityThread",
+   "type": "function",
+   "thunk_address": "0x82AC6584",
+   "variable_address": "0x820008B8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 157,
+   "ordinal_hex": "0x009D",
+   "name": "KeSetEvent",
+   "type": "function",
+   "thunk_address": "0x82AC67E4",
+   "variable_address": "0x820007BC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 173,
+   "ordinal_hex": "0x00AD",
+   "name": "KeTimeStampBundle",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x82000838"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 175,
+   "ordinal_hex": "0x00AF",
+   "name": "KeWaitForMultipleObjects",
+   "type": "function",
+   "thunk_address": "0x82AC6E84",
+   "variable_address": "0x8200095C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 176,
+   "ordinal_hex": "0x00B0",
+   "name": "KeWaitForSingleObject",
+   "type": "function",
+   "thunk_address": "0x82AC6824",
+   "variable_address": "0x820007AC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 177,
+   "ordinal_hex": "0x00B1",
+   "name": "KfAcquireSpinLock",
+   "type": "function",
+   "thunk_address": "0x82AC6654",
+   "variable_address": "0x82000878"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 179,
+   "ordinal_hex": "0x00B3",
+   "name": "KfLowerIrql",
+   "type": "function",
+   "thunk_address": "0x82AC6E24",
+   "variable_address": "0x82000944"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 180,
+   "ordinal_hex": "0x00B4",
+   "name": "KfReleaseSpinLock",
+   "type": "function",
+   "thunk_address": "0x82AC6674",
+   "variable_address": "0x82000870"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 186,
+   "ordinal_hex": "0x00BA",
+   "name": "MmAllocatePhysicalMemoryEx",
+   "type": "function",
+   "thunk_address": "0x82AC6494",
+   "variable_address": "0x820008F8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 189,
+   "ordinal_hex": "0x00BD",
+   "name": "MmFreePhysicalMemory",
+   "type": "function",
+   "thunk_address": "0x82AC64B4",
+   "variable_address": "0x820008F0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 190,
+   "ordinal_hex": "0x00BE",
+   "name": "MmGetPhysicalAddress",
+   "type": "function",
+   "thunk_address": "0x82AC6694",
+   "variable_address": "0x82000864"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 196,
+   "ordinal_hex": "0x00C4",
+   "name": "MmQueryAddressProtect",
+   "type": "function",
+   "thunk_address": "0x82AC64C4",
+   "variable_address": "0x820008EC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 198,
+   "ordinal_hex": "0x00C6",
+   "name": "MmQueryStatistics",
+   "type": "function",
+   "thunk_address": "0x82AC6B84",
+   "variable_address": "0x8200081C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 199,
+   "ordinal_hex": "0x00C7",
+   "name": "MmSetAddressProtect",
+   "type": "function",
+   "thunk_address": "0x82AC64A4",
+   "variable_address": "0x820008F4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 204,
+   "ordinal_hex": "0x00CC",
+   "name": "NtAllocateVirtualMemory",
+   "type": "function",
+   "thunk_address": "0x82AC64D4",
+   "variable_address": "0x820008E8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 205,
+   "ordinal_hex": "0x00CD",
+   "name": "NtCancelTimer",
+   "type": "function",
+   "thunk_address": "0x82AC6F74",
+   "variable_address": "0x82000998"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 206,
+   "ordinal_hex": "0x00CE",
+   "name": "NtClearEvent",
+   "type": "function",
+   "thunk_address": "0x82AC6B64",
+   "variable_address": "0x82000814"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 207,
+   "ordinal_hex": "0x00CF",
+   "name": "NtClose",
+   "type": "function",
+   "thunk_address": "0x82AC6414",
+   "variable_address": "0x82000918"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 209,
+   "ordinal_hex": "0x00D1",
+   "name": "NtCreateEvent",
+   "type": "function",
+   "thunk_address": "0x82AC6444",
+   "variable_address": "0x8200090C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 210,
+   "ordinal_hex": "0x00D2",
+   "name": "NtCreateFile",
+   "type": "function",
+   "thunk_address": "0x82AC63E4",
+   "variable_address": "0x82000924"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 212,
+   "ordinal_hex": "0x00D4",
+   "name": "NtCreateMutant",
+   "type": "function",
+   "thunk_address": "0x82AC6F64",
+   "variable_address": "0x82000994"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 215,
+   "ordinal_hex": "0x00D7",
+   "name": "NtCreateTimer",
+   "type": "function",
+   "thunk_address": "0x82AC6F94",
+   "variable_address": "0x820009A0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 218,
+   "ordinal_hex": "0x00DA",
+   "name": "NtDuplicateObject",
+   "type": "function",
+   "thunk_address": "0x82AC6FA4",
+   "variable_address": "0x820009A4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 219,
+   "ordinal_hex": "0x00DB",
+   "name": "NtFlushBuffersFile",
+   "type": "function",
+   "thunk_address": "0x82AC6F14",
+   "variable_address": "0x82000980"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 220,
+   "ordinal_hex": "0x00DC",
+   "name": "NtFreeVirtualMemory",
+   "type": "function",
+   "thunk_address": "0x82AC6484",
+   "variable_address": "0x820008FC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 223,
+   "ordinal_hex": "0x00DF",
+   "name": "NtOpenFile",
+   "type": "function",
+   "thunk_address": "0x82AC63C4",
+   "variable_address": "0x8200092C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 226,
+   "ordinal_hex": "0x00E2",
+   "name": "NtPulseEvent",
+   "type": "function",
+   "thunk_address": "0x82AC6B34",
+   "variable_address": "0x82000808"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 228,
+   "ordinal_hex": "0x00E4",
+   "name": "NtQueryDirectoryFile",
+   "type": "function",
+   "thunk_address": "0x82AC6544",
+   "variable_address": "0x820008C8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 231,
+   "ordinal_hex": "0x00E7",
+   "name": "NtQueryFullAttributesFile",
+   "type": "function",
+   "thunk_address": "0x82AC6B24",
+   "variable_address": "0x82000804"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 232,
+   "ordinal_hex": "0x00E8",
+   "name": "NtQueryInformationFile",
+   "type": "function",
+   "thunk_address": "0x82AC6534",
+   "variable_address": "0x820008CC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 238,
+   "ordinal_hex": "0x00EE",
+   "name": "NtQueryVirtualMemory",
+   "type": "function",
+   "thunk_address": "0x82AC6634",
+   "variable_address": "0x82000880"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 239,
+   "ordinal_hex": "0x00EF",
+   "name": "NtQueryVolumeInformationFile",
+   "type": "function",
+   "thunk_address": "0x82AC65C4",
+   "variable_address": "0x820008A0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 240,
+   "ordinal_hex": "0x00F0",
+   "name": "NtReadFile",
+   "type": "function",
+   "thunk_address": "0x82AC6454",
+   "variable_address": "0x82000908"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 242,
+   "ordinal_hex": "0x00F2",
+   "name": "NtReleaseMutant",
+   "type": "function",
+   "thunk_address": "0x82AC6F54",
+   "variable_address": "0x82000990"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 245,
+   "ordinal_hex": "0x00F5",
+   "name": "NtResumeThread",
+   "type": "function",
+   "thunk_address": "0x82AC6B74",
+   "variable_address": "0x82000818"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 246,
+   "ordinal_hex": "0x00F6",
+   "name": "NtSetEvent",
+   "type": "function",
+   "thunk_address": "0x82AC6B54",
+   "variable_address": "0x82000810"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 247,
+   "ordinal_hex": "0x00F7",
+   "name": "NtSetInformationFile",
+   "type": "function",
+   "thunk_address": "0x82AC6554",
+   "variable_address": "0x820008C4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 250,
+   "ordinal_hex": "0x00FA",
+   "name": "NtSetTimerEx",
+   "type": "function",
+   "thunk_address": "0x82AC6F84",
+   "variable_address": "0x8200099C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 252,
+   "ordinal_hex": "0x00FC",
+   "name": "NtSuspendThread",
+   "type": "function",
+   "thunk_address": "0x82AC65A4",
+   "variable_address": "0x820008AC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 253,
+   "ordinal_hex": "0x00FD",
+   "name": "NtWaitForSingleObjectEx",
+   "type": "function",
+   "thunk_address": "0x82AC6424",
+   "variable_address": "0x82000914"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 254,
+   "ordinal_hex": "0x00FE",
+   "name": "NtWaitForMultipleObjectsEx",
+   "type": "function",
+   "thunk_address": "0x82AC6B44",
+   "variable_address": "0x8200080C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 255,
+   "ordinal_hex": "0x00FF",
+   "name": "NtWriteFile",
+   "type": "function",
+   "thunk_address": "0x82AC6434",
+   "variable_address": "0x82000910"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 259,
+   "ordinal_hex": "0x0103",
+   "name": "ObCreateSymbolicLink",
+   "type": "function",
+   "thunk_address": "0x82AC6844",
+   "variable_address": "0x820007A4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 260,
+   "ordinal_hex": "0x0104",
+   "name": "ObDeleteSymbolicLink",
+   "type": "function",
+   "thunk_address": "0x82AC6834",
+   "variable_address": "0x820007A8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 261,
+   "ordinal_hex": "0x0105",
+   "name": "ObDereferenceObject",
+   "type": "function",
+   "thunk_address": "0x82AC6574",
+   "variable_address": "0x820008BC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 272,
+   "ordinal_hex": "0x0110",
+   "name": "ObReferenceObjectByHandle",
+   "type": "function",
+   "thunk_address": "0x82AC6594",
+   "variable_address": "0x820008B4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 281,
+   "ordinal_hex": "0x0119",
+   "name": "RtlCaptureContext",
+   "type": "function",
+   "thunk_address": "0x82AC6FB4",
+   "variable_address": "0x820009A8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 283,
+   "ordinal_hex": "0x011B",
+   "name": "RtlCompareMemoryUlong",
+   "type": "function",
+   "thunk_address": "0x82AC6624",
+   "variable_address": "0x82000884"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 293,
+   "ordinal_hex": "0x0125",
+   "name": "RtlEnterCriticalSection",
+   "type": "function",
+   "thunk_address": "0x82AC6394",
+   "variable_address": "0x82000938"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 294,
+   "ordinal_hex": "0x0126",
+   "name": "RtlFillMemoryUlong",
+   "type": "function",
+   "thunk_address": "0x82AC65F4",
+   "variable_address": "0x82000890"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 295,
+   "ordinal_hex": "0x0127",
+   "name": "RtlFreeAnsiString",
+   "type": "function",
+   "thunk_address": "0x82AC6F24",
+   "variable_address": "0x82000984"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 299,
+   "ordinal_hex": "0x012B",
+   "name": "RtlImageXexHeaderField",
+   "type": "function",
+   "thunk_address": "0x82AC65D4",
+   "variable_address": "0x8200089C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 300,
+   "ordinal_hex": "0x012C",
+   "name": "RtlInitAnsiString",
+   "type": "function",
+   "thunk_address": "0x82AC63D4",
+   "variable_address": "0x82000928"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 301,
+   "ordinal_hex": "0x012D",
+   "name": "RtlInitUnicodeString",
+   "type": "function",
+   "thunk_address": "0x82AC6F44",
+   "variable_address": "0x8200098C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 302,
+   "ordinal_hex": "0x012E",
+   "name": "RtlInitializeCriticalSection",
+   "type": "function",
+   "thunk_address": "0x82AC63B4",
+   "variable_address": "0x82000930"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 304,
+   "ordinal_hex": "0x0130",
+   "name": "RtlLeaveCriticalSection",
+   "type": "function",
+   "thunk_address": "0x82AC63A4",
+   "variable_address": "0x82000934"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 307,
+   "ordinal_hex": "0x0133",
+   "name": "RtlMultiByteToUnicodeN",
+   "type": "function",
+   "thunk_address": "0x82AC6404",
+   "variable_address": "0x8200091C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 309,
+   "ordinal_hex": "0x0135",
+   "name": "RtlNtStatusToDosError",
+   "type": "function",
+   "thunk_address": "0x82AC63F4",
+   "variable_address": "0x82000920"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 310,
+   "ordinal_hex": "0x0136",
+   "name": "RtlRaiseException",
+   "type": "function",
+   "thunk_address": "0x82AC6644",
+   "variable_address": "0x8200087C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 315,
+   "ordinal_hex": "0x013B",
+   "name": "sprintf",
+   "type": "function",
+   "thunk_address": "0x82AC66E4",
+   "variable_address": "0x82000850"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 319,
+   "ordinal_hex": "0x013F",
+   "name": "RtlTimeFieldsToTime",
+   "type": "function",
+   "thunk_address": "0x82AC6C04",
+   "variable_address": "0x82000840"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 320,
+   "ordinal_hex": "0x0140",
+   "name": "RtlTimeToTimeFields",
+   "type": "function",
+   "thunk_address": "0x82AC6B94",
+   "variable_address": "0x82000820"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 321,
+   "ordinal_hex": "0x0141",
+   "name": "RtlTryEnterCriticalSection",
+   "type": "function",
+   "thunk_address": "0x82AC6E14",
+   "variable_address": "0x82000940"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 322,
+   "ordinal_hex": "0x0142",
+   "name": "RtlUnicodeStringToAnsiString",
+   "type": "function",
+   "thunk_address": "0x82AC6F34",
+   "variable_address": "0x82000988"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 323,
+   "ordinal_hex": "0x0143",
+   "name": "RtlUnicodeToMultiByteN",
+   "type": "function",
+   "thunk_address": "0x82AC6464",
+   "variable_address": "0x82000904"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 327,
+   "ordinal_hex": "0x0147",
+   "name": "RtlUnwind",
+   "type": "function",
+   "thunk_address": "0x82AC6F04",
+   "variable_address": "0x8200097C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 333,
+   "ordinal_hex": "0x014D",
+   "name": "_vsnprintf",
+   "type": "function",
+   "thunk_address": "0x82AC66F4",
+   "variable_address": "0x82000848"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 338,
+   "ordinal_hex": "0x0152",
+   "name": "KeTlsAlloc",
+   "type": "function",
+   "thunk_address": "0x82AC68E4",
+   "variable_address": "0x82000778"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 339,
+   "ordinal_hex": "0x0153",
+   "name": "KeTlsFree",
+   "type": "function",
+   "thunk_address": "0x82AC68F4",
+   "variable_address": "0x82000774"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 340,
+   "ordinal_hex": "0x0154",
+   "name": "KeTlsGetValue",
+   "type": "function",
+   "thunk_address": "0x82AC68C4",
+   "variable_address": "0x82000780"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 341,
+   "ordinal_hex": "0x0155",
+   "name": "KeTlsSetValue",
+   "type": "function",
+   "thunk_address": "0x82AC68D4",
+   "variable_address": "0x8200077C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 344,
+   "ordinal_hex": "0x0158",
+   "name": "XboxKrnlVersion",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x82000844"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 403,
+   "ordinal_hex": "0x0193",
+   "name": "XexExecutableModuleHandle",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x82000898"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 404,
+   "ordinal_hex": "0x0194",
+   "name": "XexCheckExecutablePrivilege",
+   "type": "function",
+   "thunk_address": "0x82AC64E4",
+   "variable_address": "0x820008E0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 405,
+   "ordinal_hex": "0x0195",
+   "name": "XexGetModuleHandle",
+   "type": "function",
+   "thunk_address": "0x82AC6B04",
+   "variable_address": "0x820007FC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 406,
+   "ordinal_hex": "0x0196",
+   "name": "XexGetModuleSection",
+   "type": "function",
+   "thunk_address": "0x82AC6524",
+   "variable_address": "0x820008D0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 407,
+   "ordinal_hex": "0x0197",
+   "name": "XexGetProcedureAddress",
+   "type": "function",
+   "thunk_address": "0x82AC6514",
+   "variable_address": "0x820008D4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 421,
+   "ordinal_hex": "0x01A5",
+   "name": "__C_specific_handler",
+   "type": "function",
+   "thunk_address": "0x82AC6504",
+   "variable_address": "0x820008D8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 430,
+   "ordinal_hex": "0x01AE",
+   "name": "ExLoadedCommandLine",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x820008E4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 433,
+   "ordinal_hex": "0x01B1",
+   "name": "VdCallGraphicsNotificationRoutines",
+   "type": "function",
+   "thunk_address": "0x82AC6754",
+   "variable_address": "0x820007E0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 436,
+   "ordinal_hex": "0x01B4",
+   "name": "VdEnableDisableClockGating",
+   "type": "function",
+   "thunk_address": "0x82AC6704",
+   "variable_address": "0x820007F8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 438,
+   "ordinal_hex": "0x01B6",
+   "name": "VdEnableRingBufferRPtrWriteBack",
+   "type": "function",
+   "thunk_address": "0x82AC66B4",
+   "variable_address": "0x8200085C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 441,
+   "ordinal_hex": "0x01B9",
+   "name": "VdGetCurrentDisplayGamma",
+   "type": "function",
+   "thunk_address": "0x82AC6714",
+   "variable_address": "0x820007F4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 442,
+   "ordinal_hex": "0x01BA",
+   "name": "VdGetCurrentDisplayInformation",
+   "type": "function",
+   "thunk_address": "0x82AC6774",
+   "variable_address": "0x820007D8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 445,
+   "ordinal_hex": "0x01BD",
+   "name": "VdGetSystemCommandBuffer",
+   "type": "function",
+   "thunk_address": "0x82AC68B4",
+   "variable_address": "0x82000784"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 446,
+   "ordinal_hex": "0x01BE",
+   "name": "VdGlobalDevice",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x82000868"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 448,
+   "ordinal_hex": "0x01C0",
+   "name": "VdGpuClockInMHz",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x820007E4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 449,
+   "ordinal_hex": "0x01C1",
+   "name": "VdHSIOCalibrationLock",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x82000790"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 450,
+   "ordinal_hex": "0x01C2",
+   "name": "VdInitializeEngines",
+   "type": "function",
+   "thunk_address": "0x82AC6794",
+   "variable_address": "0x820007D0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 451,
+   "ordinal_hex": "0x01C3",
+   "name": "VdInitializeRingBuffer",
+   "type": "function",
+   "thunk_address": "0x82AC66C4",
+   "variable_address": "0x82000858"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 453,
+   "ordinal_hex": "0x01C5",
+   "name": "VdInitializeScalerCommandBuffer",
+   "type": "function",
+   "thunk_address": "0x82AC6734",
+   "variable_address": "0x820007EC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 454,
+   "ordinal_hex": "0x01C6",
+   "name": "VdIsHSIOTrainingSucceeded",
+   "type": "function",
+   "thunk_address": "0x82AC67A4",
+   "variable_address": "0x820007CC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 455,
+   "ordinal_hex": "0x01C7",
+   "name": "VdPersistDisplay",
+   "type": "function",
+   "thunk_address": "0x82AC6894",
+   "variable_address": "0x8200078C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 457,
+   "ordinal_hex": "0x01C9",
+   "name": "VdQueryVideoFlags",
+   "type": "function",
+   "thunk_address": "0x82AC6744",
+   "variable_address": "0x820007E8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 458,
+   "ordinal_hex": "0x01CA",
+   "name": "VdQueryVideoMode",
+   "type": "function",
+   "thunk_address": "0x82AC6724",
+   "variable_address": "0x820007F0"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 467,
+   "ordinal_hex": "0x01D3",
+   "name": "VdSetDisplayMode",
+   "type": "function",
+   "thunk_address": "0x82AC6764",
+   "variable_address": "0x820007DC"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 469,
+   "ordinal_hex": "0x01D5",
+   "name": "VdSetGraphicsInterruptCallback",
+   "type": "function",
+   "thunk_address": "0x82AC6784",
+   "variable_address": "0x820007D4"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 473,
+   "ordinal_hex": "0x01D9",
+   "name": "VdSetSystemCommandBufferGpuIdentifierAddress",
+   "type": "function",
+   "thunk_address": "0x82AC6664",
+   "variable_address": "0x82000874"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 476,
+   "ordinal_hex": "0x01DC",
+   "name": "VdShutdownEngines",
+   "type": "function",
+   "thunk_address": "0x82AC67B4",
+   "variable_address": "0x820007C8"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 479,
+   "ordinal_hex": "0x01DF",
+   "name": "KiApcNormalRoutineNop",
+   "type": "function",
+   "thunk_address": "0x82AC6684",
+   "variable_address": "0x8200086C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 499,
+   "ordinal_hex": "0x01F3",
+   "name": "XAudioRegisterRenderDriverClient",
+   "type": "function",
+   "thunk_address": "0x82AC6EC4",
+   "variable_address": "0x8200096C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 500,
+   "ordinal_hex": "0x01F4",
+   "name": "XAudioUnregisterRenderDriverClient",
+   "type": "function",
+   "thunk_address": "0x82AC6EB4",
+   "variable_address": "0x82000968"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 501,
+   "ordinal_hex": "0x01F5",
+   "name": "XAudioSubmitRenderDriverFrame",
+   "type": "function",
+   "thunk_address": "0x82AC6ED4",
+   "variable_address": "0x82000970"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 503,
+   "ordinal_hex": "0x01F7",
+   "name": "XAudioGetVoiceCategoryVolumeChangeMask",
+   "type": "function",
+   "thunk_address": "0x82AC6E64",
+   "variable_address": "0x82000954"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 504,
+   "ordinal_hex": "0x01F8",
+   "name": "XAudioGetVoiceCategoryVolume",
+   "type": "function",
+   "thunk_address": "0x82AC6E34",
+   "variable_address": "0x82000948"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 548,
+   "ordinal_hex": "0x0224",
+   "name": "XMACreateContext",
+   "type": "function",
+   "thunk_address": "0x82AC6EA4",
+   "variable_address": "0x82000964"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 550,
+   "ordinal_hex": "0x0226",
+   "name": "XMAReleaseContext",
+   "type": "function",
+   "thunk_address": "0x82AC6E94",
+   "variable_address": "0x82000960"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 603,
+   "ordinal_hex": "0x025B",
+   "name": "VdSwap",
+   "type": "function",
+   "thunk_address": "0x82AC68A4",
+   "variable_address": "0x82000788"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 614,
+   "ordinal_hex": "0x0266",
+   "name": "KeCertMonitorData",
+   "type": "variable",
+   "thunk_address": null,
+   "variable_address": "0x8200084C"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 617,
+   "ordinal_hex": "0x0269",
+   "name": "VdRetrainEDRAM",
+   "type": "function",
+   "thunk_address": "0x82AC6874",
+   "variable_address": "0x82000798"
+  },
+  {
+   "lib": "xboxkrnl.exe",
+   "lib_index": 1,
+   "ordinal": 618,
+   "ordinal_hex": "0x026A",
+   "name": "VdRetrainEDRAMWorker",
+   "type": "function",
+   "thunk_address": "0x82AC6884",
+   "variable_address": "0x82000794"
+  }
+ ]
+}
