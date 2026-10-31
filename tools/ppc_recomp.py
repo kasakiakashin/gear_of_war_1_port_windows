@@ -1385,7 +1385,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(PPC_OPT_FLAGS "-O1" CACHE STRING "Otimização das rotinas traduzidas")
+set(PPC_OPT_FLAGS "-O2" CACHE STRING "Otimização das rotinas traduzidas")
 set(PPC_RECOMP_SOURCES
 {src_list}
 )

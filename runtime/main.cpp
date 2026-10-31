@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -104,7 +105,26 @@ void raise_timer_resolution() {
     if (auto f = (UINT(WINAPI*)(UINT))GetProcAddress(mm, "timeBeginPeriod")) f(1);
 }
 
+// Sem GOW_VERBOSE=1 (ou um GOW_TRACE_*, GOW_WATCHDOG, GOW_HEARTBEAT), o log do jogo não vai a lado nenhum: nem consola nem
+// ficheiro. Um relatório de crash abre gow_crash.log (diag::crash_report).
+void setup_logging() {
+  bool verbose = false;
+  for (char** e = _environ; e && *e; e++)
+    if (!std::strncmp(*e, "GOW_VERBOSE=1", 13) || !std::strncmp(*e, "GOW_TRACE", 9) || !std::strncmp(*e, "GOW_WATCHDOG=", 13) ||
+        !std::strncmp(*e, "GOW_HEARTBEAT=", 14) || !std::strncmp(*e, "GOW_PROFILE_GPU=", 16))
+      verbose = true;
+  if (!verbose) {
+    (void)std::freopen("NUL", "w", stderr);
+    diag::set_silent();
+    return;
+  }
+  // Aplicação GUI: sem stderr herdado (redirecionado por quem a lançou), usa a consola de onde foi aberta, se houver.
+  HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+  if ((!err || err == INVALID_HANDLE_VALUE) && AttachConsole(ATTACH_PARENT_PROCESS)) (void)std::freopen("CONOUT$", "w", stderr);
+}
+
 int main(int argc, char** argv) {
+  setup_logging();
   raise_timer_resolution();
   game_source::init_working_dir();
   config::get();  // cria o gow_config.ini se não existir

@@ -17,7 +17,14 @@ void set_last_import(const char* name) {
 }
 const char* last_import() { return t_last_import; }
 
+namespace {
+bool g_silent = false;  // sem log: um crash abre gow_crash.log
+}  // namespace
+
+void set_silent() { g_silent = true; }
+
 void crash_report() {
+  if (g_silent) (void)std::freopen("gow_crash.log", "w", stderr);
   std::fprintf(stderr, "[diag] último import desta thread: %s\n", t_last_import ? t_last_import : "(nenhum)");
   kernel::dump_threads();
   xbox::print_import_stats();

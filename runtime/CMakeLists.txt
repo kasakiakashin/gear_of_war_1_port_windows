@@ -53,6 +53,8 @@ target_include_directories(gow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gow PRIVATE ppc_recomp ws2_32 comctl32 gdi32 bcrypt comdlg32 shell32)
 if(NOT MSVC)
   target_compile_options(gow PRIVATE -fwrapv -fno-strict-aliasing -Wall -Wno-unused-function)
+  # Sem janela de consola; ver setup_logging em main.cpp.
+  target_link_options(gow PRIVATE -Wl,--subsystem,windows)
 endif()
 
 # Áudio XMA: DLLs do FFmpeg (xma2) junto do executável, em ffmpeg/. A origem são as DLLs já instaladas nesta máquina

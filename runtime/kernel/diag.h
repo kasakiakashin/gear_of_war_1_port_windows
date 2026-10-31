@@ -10,6 +10,7 @@ void set_last_import(const char* name);
 const char* last_import();
 // Imprime contexto (último import, estatísticas de imports) antes de o processo morrer.
 void crash_report();
+void set_silent();  // o log normal está desligado: crash_report passa a escrever em gow_crash.log
 // Backtrace convidado: segue a cadeia de frames (r1 -> [r1]) e o LR salvo em [frame_anterior - 8].
 void guest_backtrace(const char* why, uint64_t sp, uint64_t lr);
 
