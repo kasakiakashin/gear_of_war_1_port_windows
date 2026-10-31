@@ -53,7 +53,7 @@ namespace {
 constexpr uint32_t kWidth = 1280, kHeight = 720, kBackBuffers = 2;
 // Dois frames em voo: cada anel (upload, SRV, samplers) está dividido em duas metades, uma por slot.
 constexpr int kSlots = 2;
-constexpr size_t kUploadSize = 192ull << 20;  // por slot
+constexpr size_t kUploadSize = 256ull << 20;  // por slot
 constexpr uint32_t kSrvHeapSize = 32768, kSamplerHeapSize = 1024;  // por slot
 constexpr uint32_t kRtvHeapSize = 512, kDsvHeapSize = 128;
 
@@ -151,7 +151,19 @@ struct Renderer {
   };
   std::unordered_map<uint64_t, VbCopy> vb_cache;
   uint64_t vb_stale = 0;
+  struct IndexCopy {
+    D3D12_GPU_VIRTUAL_ADDRESS va;
+    uint32_t count;
+    D3D12_PRIMITIVE_TOPOLOGY topo;
+    D3D12_PRIMITIVE_TOPOLOGY_TYPE type;
+  };
+  std::unordered_map<uint64_t, IndexCopy> idx_cache;
+  ID3D12RootSignature* bound_root = nullptr;
+  ID3D12PipelineState* bound_pso = nullptr;
   std::unordered_map<uint64_t, uint32_t> srv_tables, smp_tables;  // tabelas de descritores por conteúdo, por submit
+  std::chrono::steady_clock::time_point last_present;
+  float stat_worst_ms = 0;
+  uint32_t stat_slow_frames = 0;  // acima de 50 ms
   uint32_t stat_submits = 0, stat_creates = 0, stat_early[3] = {};  // submits a meio do frame: upload, SRV, samplers
   int shader_wait_ms = 0;  // tempo já gasto neste frame à espera do FXC
   ID3D12DescriptorHeap *srv_heap = nullptr, *sampler_heap = nullptr, *rtv_heap = nullptr, *dsv_heap = nullptr;
@@ -390,6 +402,9 @@ void submit(bool wait_all = false) {
   g.list->Reset(g.allocator, nullptr);
   g.upload_offset = 0;
   g.vb_cache.clear();
+  g.idx_cache.clear();
+  g.bound_root = nullptr;
+  g.bound_pso = nullptr;
   g.srv_tables.clear();
   g.smp_tables.clear();
   g.stat_submits++;
@@ -417,6 +432,25 @@ D3D12_GPU_VIRTUAL_ADDRESS upload_cb(const void* data, size_t n) {
   D3D12_GPU_VIRTUAL_ADDRESS va = 0;
   uint8_t* p = upload_alloc((n + 255) & ~size_t(255), 256, &va);
   if (p) std::memcpy(p, data, n);
+  return va;
+}
+
+// Constantes ALU: reserva as 256 (o cbuffer declara-as todas), mas só copia as que o shader lê. Copiar 8 KiB por desenho para
+// memória de upload custava vários ms por frame e enchia o anel.
+D3D12_GPU_VIRTUAL_ADDRESS upload_alu(const uint32_t* src, const uint64_t used[4]) {
+  D3D12_GPU_VIRTUAL_ADDRESS va = 0;
+  uint8_t* p = upload_alloc(256 * 16, 256, &va);
+  if (!p) return va;
+  for (uint32_t i = 0; i < 256;) {
+    if (!((used[i >> 6] >> (i & 63)) & 1)) {
+      i++;
+      continue;
+    }
+    uint32_t j = i + 1;
+    while (j < 256 && ((used[j >> 6] >> (j & 63)) & 1)) j++;
+    std::memcpy(p + i * 16, src + i * 4, (j - i) * 16);
+    i = j;
+  }
   return va;
 }
 
@@ -887,6 +921,7 @@ void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_stat
   uint32_t slot = srv_alloc(1);
   write_srv(src, slot, swizzle);
   g.list->SetPipelineState(pso);
+  g.bound_root = nullptr, g.bound_pso = nullptr;
   g.list->SetGraphicsRootSignature(g.blit_root);
   float c[8] = {sx / src.width - dx * (sw / dw) / src.width, sy / src.height - dy * (sh / dh) / src.height,
                 (sw / dw) / src.width, (sh / dh) / src.height, linear ? 1.0f : 0.0f, (float)depth_mode,
@@ -905,8 +940,9 @@ void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_stat
 // ---- Shaders ----
 // Compilação FXC em threads de fundo: o FXC demora de 50 ms a vários segundos por shader e parava o processador de
 // comandos ao entrar em áreas novas. Um desenho espera pelo seu shader até gastar o orçamento do frame (GOW_SHADER_WAIT_MS,
-// 500 ms): sem isto, numa cache vazia, as personagens (VS de skinning, até 8 s de FXC) ficavam invisíveis durante as
-// primeiras cenas. Esgotado o orçamento, é saltado, como no modo assíncrono do Xenia. GOW_SYNC_SHADERS=1 compila no momento.
+// 120 ms): sem isto, numa cache vazia, as personagens (VS de skinning, até 8 s de FXC) ficavam invisíveis mais tempo. Mais do
+// que isto faz o jogo parar ao andar por áreas novas. Esgotado o orçamento, é saltado, como no modo assíncrono do Xenia.
+// GOW_SYNC_SHADERS=1 compila no momento.
 struct CompileJob {
   Compiled* c;
   std::string name, target;
@@ -944,7 +980,7 @@ void finish_compile(Compiled& c, const std::string& name, const std::filesystem:
 bool wait_for_shader(Compiled& c) {
   static const int budget_ms = [] {
     const char* e = std::getenv("GOW_SHADER_WAIT_MS");
-    return e ? std::atoi(e) : 500;
+    return e ? std::atoi(e) : 120;
   }();
   const ULONGLONG t0 = GetTickCount64();
   while (c.pending.load(std::memory_order_acquire)) {
@@ -959,6 +995,7 @@ bool wait_for_shader(Compiled& c) {
 }
 
 void compile_worker() {
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);  // o jogo primeiro
   for (;;) {
     CompileJob job;
     {
@@ -1148,8 +1185,9 @@ ID3D12PipelineState* pipeline(Compiled* vs, Compiled* ps, const DrawState& s) {
   if (s.dsv != DXGI_FORMAT_UNKNOWN && ((dc >> 1) & 1) && !((dc >> 2) & 1)) {
     const uint32_t zf = (dc >> 4) & 7;
     static const int bias_units = std::getenv("GOW_LIGHT_BIAS") ? std::atoi(std::getenv("GOW_LIGHT_BIAS")) : 4000;
-    if (zf == 6 || zf == 4) d.RasterizerState.DepthBias = bias_units, d.RasterizerState.SlopeScaledDepthBias = 0.25f;  // >=, >
-    else if (zf == 3 || zf == 1) d.RasterizerState.DepthBias = -bias_units, d.RasterizerState.SlopeScaledDepthBias = -0.25f;  // <=, <
+    static const float bias_slope = std::getenv("GOW_LIGHT_SLOPE") ? (float)std::atof(std::getenv("GOW_LIGHT_SLOPE")) : 0.25f;
+    if (zf == 6 || zf == 4) d.RasterizerState.DepthBias = bias_units, d.RasterizerState.SlopeScaledDepthBias = bias_slope;  // >=, >
+    else if (zf == 3 || zf == 1) d.RasterizerState.DepthBias = -bias_units, d.RasterizerState.SlopeScaledDepthBias = -bias_slope;  // <=, <
   }
   if (s.depth_bias || s.slope_bits) {
     float slope;
@@ -1281,6 +1319,7 @@ struct SysConstants {
   uint32_t vb_size[8];
   float tex_size[32][4];
   float rt_scale[4];  // 2^color_exp_bias de cada RT (RB_COLOR*_INFO bits 20..25, com sinal)
+  float rt_max[4];    // 31,875 nos RT 2_10_10_10_FLOAT (7e3); 0 nos outros
   float res[4];       // lógico/host
 };
 
@@ -1708,6 +1747,13 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   if (!num) return;
   Compiled* vs = shader(false);
   Compiled* ps = mode == 4 ? shader(true) : nullptr;
+  // GOW_SKIP_PS=hash6,hash6: desenhos com esses PS são saltados (para isolar um efeito).
+  static const std::string skip_ps = std::getenv("GOW_SKIP_PS") ? std::getenv("GOW_SKIP_PS") : "";
+  if (ps && !skip_ps.empty()) {
+    char hx[8];
+    std::snprintf(hx, sizeof hx, "%06llX", (unsigned long long)(ps->info.hash >> 40));
+    if (skip_ps.find(hx) != std::string::npos) return;
+  }
   if (!vs || (mode == 4 && !ps)) {
     g.skipped++;
     return;
@@ -1718,31 +1764,47 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     g.stat_early[g.upload_offset + (96ull << 20) > kUploadSize ? 0 : g.srv_next + 64 > kSrvHeapSize ? 1 : 2]++;
     submit();
   }
-  // Índices do convidado
+  // Índices do convidado. Cada objeto é desenhado uma vez por tile e por luz: a mesma lista expandida serve para todos os
+  // desenhos deste submit, se a memória não tiver mudado (expandir e copiar por desenho custava 12 ms/frame com 6000 desenhos).
   Prof pf_idx(kProfIndex);
-  std::vector<uint32_t> gi(num);
-  if (source == 0) {
-    const uint8_t* p = physical(dma_base & ~(i32 ? 3u : 1u));
-    uint32_t endian = dma_size >> 30;
-    for (uint32_t i = 0; i < num; i++) gi[i] = guest_index(p, i32, endian, i);
-  } else if (source == 2) {
-    for (uint32_t i = 0; i < num; i++) gi[i] = i;
-  } else {
-    for (uint32_t i = 0; i < num; i++) {
-      uint32_t w = i32 ? i : i / 2;
-      uint32_t v = w < immediate_count ? immediate[w] : 0;
-      gi[i] = i32 ? v : ((i & 1) ? v >> 16 : v & 0xFFFF);
-    }
-  }
   bool restart = (reg(kPaSuScModeCntl) >> 21) & 1;
   std::vector<uint32_t> host;
   D3D12_PRIMITIVE_TOPOLOGY topo;
   Phase ph("desenho (índices, texturas, gravação)");
   DrawState st;
-  if (!expand(prim, gi, restart, reg(kVgtMultiPrimIbResetIndx), host, topo, st.topology) || host.empty()) {
-    warn_once("prim" + std::to_string(prim), "[d3d12] primitiva 0x%X não suportada\n", prim);
-    g.skipped++;
-    return;
+  D3D12_GPU_VIRTUAL_ADDRESS idx_va = 0;
+  uint32_t host_count = 0;
+  uint64_t idx_key = 0;
+  if (source == 0) {
+    const uint8_t* p = physical(dma_base & ~(i32 ? 3u : 1u));
+    const size_t bytes = (size_t)num * (i32 ? 4 : 2), n = std::min<size_t>(bytes, 1024);
+    idx_key = hash_bytes(p, n) ^ hash_bytes(p + bytes - n, n) * 3 ^ (uint64_t)dma_base << 20 ^ (uint64_t)num * 0x100000001B3ull ^
+              (uint64_t)(prim | (i32 ? 64u : 0u) | (restart ? 128u : 0u) | (dma_size >> 30) << 8) << 50 ^ (uint64_t)reg(kVgtMultiPrimIbResetIndx) * 31;
+    if (auto it = g.idx_cache.find(idx_key); it != g.idx_cache.end()) {
+      idx_va = it->second.va, host_count = it->second.count, topo = it->second.topo, st.topology = it->second.type;
+    }
+  }
+  if (!idx_va) {
+    std::vector<uint32_t> gi(num);
+    if (source == 0) {
+      const uint8_t* p = physical(dma_base & ~(i32 ? 3u : 1u));
+      uint32_t endian = dma_size >> 30;
+      for (uint32_t i = 0; i < num; i++) gi[i] = guest_index(p, i32, endian, i);
+    } else if (source == 2) {
+      for (uint32_t i = 0; i < num; i++) gi[i] = i;
+    } else {
+      for (uint32_t i = 0; i < num; i++) {
+        uint32_t w = i32 ? i : i / 2;
+        uint32_t v = w < immediate_count ? immediate[w] : 0;
+        gi[i] = i32 ? v : ((i & 1) ? v >> 16 : v & 0xFFFF);
+      }
+    }
+    if (!expand(prim, gi, restart, reg(kVgtMultiPrimIbResetIndx), host, topo, st.topology) || host.empty()) {
+      warn_once("prim" + std::to_string(prim), "[d3d12] primitiva 0x%X não suportada\n", prim);
+      g.skipped++;
+      return;
+    }
+    host_count = (uint32_t)host.size();
   }
   pf_idx.stop();
   Prof pf_setup(kProfSetup);
@@ -1754,6 +1816,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4];
   float rt_scale[4] = {1, 1, 1, 1};
   Texture* first = nullptr;
+  SysConstants sys{};
   if (mode == 4) {
     for (uint32_t i = 0; i < 4; i++) {
       if (!(ps->info.color_exports & (1u << i))) continue;
@@ -1765,6 +1828,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
       st.rt[st.num_rt] = t->format;
       st.blend[st.num_rt] = reg(i == 0 ? kRbBlendControl0 : kRbBlendControl1 + i - 1);
       rt_scale[i] = std::ldexp(1.0f, (int32_t)(info << 6) >> 26);
+      const uint32_t xf = (info >> 16) & 0xF;
+      sys.rt_max[i] = xf == 3 || xf == 12 ? 31.875f : 0.0f;
       st.num_rt++;
       if (!first) first = t;
     }
@@ -1813,7 +1878,6 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     return;
   }
   const uint32_t* cr = constant_registers();
-  SysConstants sys{};
   for (int i = 0; i < 3; i++) {
     sys.vp_scale[i] = regf(kPaClVportXscale + 2 * i);
     sys.vp_offset[i] = regf(kPaClVportXscale + 2 * i + 1);
@@ -1863,10 +1927,11 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     transition(*t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     slot_tex[k] = t;
     D3D12_SAMPLER_DESC sd{};
-    bool lin = tf.mag_filter() == 1 || tf.min_filter() == 1;
-    bool mip_lin = tf.mip_filter() == 1;
-    sd.Filter = lin ? (mip_lin ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT)
-                    : (mip_lin ? D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT);
+    // Filtro da instrução tfetch, ou o da constante de fetch se a instrução o deixar a ela (3).
+    const uint8_t ov = ps->info.tex_filter[k];
+    const uint32_t mag = (ov & 3) != 3 ? ov & 3 : tf.mag_filter(), min = ((ov >> 2) & 3) != 3 ? (ov >> 2) & 3 : tf.min_filter(),
+                   mip = ((ov >> 4) & 3) != 3 ? (ov >> 4) & 3 : tf.mip_filter();
+    sd.Filter = (D3D12_FILTER)((min == 1 ? 0x10 : 0) | (mag == 1 ? 0x04 : 0) | (mip == 1 ? 0x01 : 0));
     sd.AddressU = address_mode(tf.clamp_x());
     sd.AddressV = address_mode(tf.clamp_y());
     sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -1940,23 +2005,25 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   uint32_t vs_base = reg(kSqVsConst) & 0x1FF, ps_base = reg(kSqPsConst) & 0x1FF;
   if (vs_base > 256) vs_base = 0;
   if (ps_base > 256) ps_base = 256;
-  D3D12_GPU_VIRTUAL_ADDRESS cb_vs = upload_cb(cr + vs_base * 4, 256 * 16);
-  D3D12_GPU_VIRTUAL_ADDRESS cb_ps = upload_cb(cr + ps_base * 4, 256 * 16);
+  D3D12_GPU_VIRTUAL_ADDRESS cb_vs = upload_alu(cr + vs_base * 4, vs->info.const_used);
+  D3D12_GPU_VIRTUAL_ADDRESS cb_ps = ps ? upload_alu(cr + ps_base * 4, ps->info.const_used) : upload_cb(cr + ps_base * 4, 256 * 16);
   D3D12_GPU_VIRTUAL_ADDRESS cb_fetch = upload_cb(cr + (kConstFetch - 0x4000), 192 * 4);
   uint32_t bl[40];
   std::memcpy(bl, cr + (kConstBool - 0x4000), 8 * 4);
   std::memcpy(bl + 8, cr + (kConstLoop - 0x4000), 32 * 4);
   D3D12_GPU_VIRTUAL_ADDRESS cb_bools = upload_cb(bl, sizeof bl);
   D3D12_GPU_VIRTUAL_ADDRESS cb_sys = upload_cb(&sys, sizeof sys);
-  D3D12_GPU_VIRTUAL_ADDRESS idx_va = 0;
-  uint8_t* ip = upload_alloc(host.size() * 4, 256, &idx_va);
-  if (!ip) return;
-  std::memcpy(ip, host.data(), host.size() * 4);
+  if (!idx_va) {
+    uint8_t* ip = upload_alloc(host.size() * 4, 256, &idx_va);
+    if (!ip) return;
+    std::memcpy(ip, host.data(), host.size() * 4);
+    if (idx_key) g.idx_cache[idx_key] = {idx_va, host_count, topo, st.topology};
+  }
   pf_const.stop();
   Prof pf_rec(kProfRecord);
   // Gravação
-  g.list->SetGraphicsRootSignature(g.root);
-  g.list->SetPipelineState(pso);
+  if (g.bound_root != g.root) g.list->SetGraphicsRootSignature(g.root), g.bound_root = g.root;
+  if (g.bound_pso != pso) g.list->SetPipelineState(pso), g.bound_pso = pso;
   g.list->SetGraphicsRootConstantBufferView(0, cb_vs);
   g.list->SetGraphicsRootConstantBufferView(1, cb_ps);
   g.list->SetGraphicsRootConstantBufferView(2, cb_fetch);
@@ -1984,7 +2051,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   if (sc.right <= sc.left || sc.bottom <= sc.top) sc = {0, 0, (LONG)first->width, (LONG)first->height};
   g.list->RSSetScissorRects(1, &sc);
   g.list->IASetPrimitiveTopology(topo);
-  g.list->DrawInstanced((UINT)host.size(), 1, 0, 0);
+  g.list->DrawInstanced(host_count, 1, 0, 0);
   g.draws++;
   // GOW_TRACE_AFTER_RESOLVE=N: só os desenhos depois do resolve N (passes de pós-processamento), com estado.
   static const uint32_t trace_after = std::getenv("GOW_TRACE_AFTER_RESOLVE") ? (uint32_t)std::atoi(std::getenv("GOW_TRACE_AFTER_RESOLVE")) : 0;
@@ -2003,7 +2070,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
       }
     uint32_t ci = reg(kRbColorInfo);
     std::fprintf(stderr, "[render] desenho prim %u n=%u (%zu) rt base %u fmt %u pitch %u modo %u vs %016llX ps %016llX%s\n",
-                 prim, num, host.size(), ci & 0xFFF, (ci >> 16) & 0xF, pitch, mode, (unsigned long long)vs->info.hash,
+                 prim, num, (size_t)host_count, ci & 0xFFF, (ci >> 16) & 0xF, pitch, mode, (unsigned long long)vs->info.hash,
                  ps ? (unsigned long long)ps->info.hash : 0ull, tex.c_str());
   }
 }
@@ -2084,14 +2151,23 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   transition(bb, bb_state, D3D12_RESOURCE_STATE_PRESENT);
   submit();
   g.swapchain->Present(config::get().vsync ? 1 : 0, 0);
+  {
+    const auto now = std::chrono::steady_clock::now();
+    const float ms = std::chrono::duration<float, std::milli>(now - g.last_present).count();
+    g.last_present = now;
+    g.stat_worst_ms = std::max(g.stat_worst_ms, ms);
+    if (ms > 50.0f) g.stat_slow_frames++;
+  }
   if (g.frame % 120 == 0) {
     char title_[160];
     std::snprintf(title_, sizeof title_, "Gears of War (recompilado) - frame %llu, %u desenhos, %u resolves",
                   (unsigned long long)g.frame, g.draws, g.resolves);
     window::set_title((title_ + net::status()).c_str());
-    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames\n",
+    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames; pior frame %.0f ms, %u acima de 50 ms\n",
                  (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
-                 g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates);
+                 g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates, g.stat_worst_ms, g.stat_slow_frames);
+    g.stat_worst_ms = 0;
+    g.stat_slow_frames = 0;
     g.stat_submits = g.stat_creates = 0;
     g.stat_early[0] = g.stat_early[1] = g.stat_early[2] = 0;
     if (g_profile && g.frame) {

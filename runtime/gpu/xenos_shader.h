@@ -27,6 +27,10 @@ struct TranslatedShader {
   std::vector<uint32_t> vfetch_slots;  // VS: slots de fetch de vértices usados (0..95), na ordem dos registradores
   uint32_t texture_mask = 0;    // PS: constantes de fetch de textura usadas (bit k)
   uint32_t cube_mask = 0;       // PS: dessas, as amostradas como cube map (TextureCube)
+  // PS: filtro pedido pela própria instrução tfetch, por constante: mag | min << 2 | mip << 4 (0 = ponto, 1 = linear,
+  // 2 = nível base, 3 = o da constante de fetch).
+  uint8_t tex_filter[32];
+  uint64_t const_used[4] = {};  // constantes ALU lidas (bit por constante); todas se houver endereçamento relativo
   uint32_t color_exports = 0;   // PS: oC0..oC3 escritos (bit i)
   bool writes_depth = false;
   uint32_t alu_count = 0, fetch_count = 0, cf_count = 0;

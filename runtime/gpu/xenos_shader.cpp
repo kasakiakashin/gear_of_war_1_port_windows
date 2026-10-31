@@ -42,9 +42,13 @@ cbuffer XeSystem : register(b3) {
   uint4 xe_vb_size[2];
   float4 xe_tex_size[32];
   float4 xe_rt_scale;    // 2^color_exp_bias por RT
+  float4 xe_rt_max;      // > 0: o formato real do RT é 7e3 (limitado a [0, 31,875]), guardado aqui em 16 bits float
   float4 xe_res;         // x = y = lógico/host (1/ResolutionScale): os shaders veem sempre coordenadas 1280×720
 };
 uint xe_fetch_dw(uint i) { return xe_fetch[i >> 2][i & 3]; }
+// rcp(0) e afins dão infinito: no formato 7e3 do Xenos isso fica em 31,875, mas em 16 bits float passava ao bloom e ao DOF
+// como blocos brancos.
+float4 xe_out(float4 v, float m) { return m > 0.0 ? float4(clamp(v.xyz, 0.0, m), saturate(v.w)) : v; }
 uint xe_swap(uint v, uint e) {
   if (e == 1) return ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
   if (e == 2) return (v << 24) | ((v & 0xFF00u) << 8) | ((v >> 8) & 0xFF00u) | (v >> 24);
@@ -64,7 +68,17 @@ float xe_conv(uint v, uint n, uint fl) {
   if (fl & 2u) return (float)v;
   return (float)v / (float)((1u << n) - 1u);
 }
-float4 xe_tswz(float4 t, uint d3) {
+// Modo de cada canal na constante de fetch (dword 0, 2 bits por canal a partir do bit 2): 0 = sem sinal, 1 = com sinal (as cópias HDR da
+// cena, em vírgula flutuante, vêm assim: o valor fica como está),
+// 2 = sem sinal com desvio (2x - 1), 3 = gama. A gama do Xenos é linear por troços, não sRGB. Em hardware a conversão é anterior à
+// filtragem; aqui é posterior, o que só muda ligeiramente as transições entre texels.
+float xe_tsign(float x, uint m) {
+  if (m == 3u) return x < 0.25 ? x * 0.25 : x < 0.375 ? x * 0.5 - 0.0625 : x < 0.75 ? x - 0.25 : x * 2.0 - 1.0;
+  if (m == 2u) return x * 2.0 - 1.0;
+  return x;
+}
+float4 xe_tswz(float4 t, uint d0, uint d3) {
+  t = float4(xe_tsign(t.x, (d0 >> 2) & 3u), xe_tsign(t.y, (d0 >> 4) & 3u), xe_tsign(t.z, (d0 >> 6) & 3u), xe_tsign(t.w, (d0 >> 8) & 3u));
   uint sw = (d3 >> 1) & 0xFFFu;
   float4 o;
   [unroll] for (uint i = 0; i < 4; i++) {
@@ -135,6 +149,9 @@ class Translator {
     out.vfetch_slots = vslots_;
     out.texture_mask = tex_mask_;
     out.cube_mask = cube_mask_;
+    for (int k = 0; k < 4; k++) out.const_used[k] = const_used_[k];
+    out.const_used[0] |= 1;  // os operandos sem uso são escritos como c[0]
+    for (int k = 0; k < 32; k++) out.tex_filter[k] = tex_filter_[k] ? tex_filter_[k] & 0x3F : 0x3F;
     out.color_exports = color_exports_;
     out.writes_depth = writes_depth_;
     out.alu_count = alu_;
@@ -151,6 +168,8 @@ class Translator {
   std::vector<uint32_t> vslots_;
   std::map<uint32_t, int> vslot_reg_;
   uint32_t tex_mask_ = 0, cube_mask_ = 0, color_exports_ = 0, alu_ = 0, fetch_ = 0;
+  uint8_t tex_filter_[32] = {};  // bit 7 = já definido
+  uint64_t const_used_[4] = {};
   bool writes_depth_ = false;
   bool linear_ = false;  // sem loops/calls/saltos para trás: blocos em sequência guardados por `resume`
   // Último vfetch completo (os mini-fetches reutilizam o índice e o passo).
@@ -185,7 +204,11 @@ class Translator {
 
   // Constante: o 1º operando constante usa const_0_rel_abs, os seguintes const_1_rel_abs.
   std::string const_ref(uint32_t index, bool addressed, bool a0_relative) {
-    if (!addressed) return fmt("c[%u]", index & 255);
+    if (!addressed) {
+      const_used_[(index & 255) >> 6] |= 1ull << (index & 63);
+      return fmt("c[%u]", index & 255);
+    }
+    const_used_[0] = const_used_[1] = const_used_[2] = const_used_[3] = ~0ull;
     return fmt("c[(%u + %s) & 255]", index & 255, a0_relative ? "a0" : "aL");
   }
 
@@ -529,16 +552,22 @@ class Translator {
       s += fmt("      float2 tc = float2(%s.%c, %s.%c);\n", sr.c_str(), kComp[sw & 3], sr.c_str(), kComp[(sw >> 2) & 3]);
     }
     if (bits(d0, 25, 1) && !cube) s += fmt("      tc /= max(xe_tex_size[%u].xy, float2(1.0, 1.0));\n", k);
+    // Deslocamento da instrução, em meios texels com sinal (5 bits), usado nos filtros de pós-processamento.
+    if (const int ox = (int)(bits(w[2], 16, 5) << 27) >> 27, oy = (int)(bits(w[2], 21, 5) << 27) >> 27; (ox || oy) && !cube)
+      s += fmt("      tc += float2(%f, %f) / max(xe_tex_size[%u].xy, float2(1.0, 1.0));\n", ox * 0.5, oy * 0.5, k);
     // Cópias de resolve podem ser maiores que o que a constante de fetch descreve (pitch de destino alinhado).
     if (pixel_ && !cube) s += fmt("      tc *= xe_tex_size[%u].zw;\n", k);
     if (pixel_) {
       tex_mask_ |= 1u << k;
+      // A instrução pode impor o filtro: sem isto, o bloom e o DOF de baixa resolução saíam aos blocos quando a constante
+      // de fetch dizia "ponto". Se a mesma textura for lida de duas formas, ganha a primeira.
+      if (!tex_filter_[k]) tex_filter_[k] = (uint8_t)(0x80 | bits(d1, 12, 2) | bits(d1, 14, 2) << 2 | bits(d1, 16, 2) << 4);
       // LOD automático (mips) só sem o ciclo da máquina de estados: derivadas dentro de um ciclo de iterações
       // variáveis não são permitidas pelo FXC.
       if (linear_)
-        s += fmt("      float4 tv = xe_tswz(t%u.Sample(s%u, tc), xe_fetch_dw(%u));\n", k, k, k * 6 + 3);
+        s += fmt("      float4 tv = xe_tswz(t%u.Sample(s%u, tc), xe_fetch_dw(%u), xe_fetch_dw(%u));\n", k, k, k * 6, k * 6 + 3);
       else
-        s += fmt("      float4 tv = xe_tswz(t%u.SampleLevel(s%u, tc, 0.0), xe_fetch_dw(%u));\n", k, k, k * 6 + 3);
+        s += fmt("      float4 tv = xe_tswz(t%u.SampleLevel(s%u, tc, 0.0), xe_fetch_dw(%u), xe_fetch_dw(%u));\n", k, k, k * 6, k * 6 + 3);
     } else {
       s += "      float4 tv = float4(0.0, 0.0, 0.0, 0.0);\n";
     }
@@ -762,7 +791,8 @@ VSOut main(uint vid : SV_VertexID) {
     if (!apass) discard;
   }
   PSOut o;
-  o.c0 = oC[0] * xe_rt_scale.x; o.c1 = oC[1] * xe_rt_scale.y; o.c2 = oC[2] * xe_rt_scale.z; o.c3 = oC[3] * xe_rt_scale.w;
+  o.c0 = xe_out(oC[0] * xe_rt_scale.x, xe_rt_max.x); o.c1 = xe_out(oC[1] * xe_rt_scale.y, xe_rt_max.y);
+  o.c2 = xe_out(oC[2] * xe_rt_scale.z, xe_rt_max.z); o.c3 = xe_out(oC[3] * xe_rt_scale.w, xe_rt_max.w);
 )";
       if (writes_depth_) h += "  o.depth = saturate(oDepth.x);\n";
       h += "  return o;\n}\n";
