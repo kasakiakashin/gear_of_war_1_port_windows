@@ -50,7 +50,7 @@ std::atomic<bool> g_enabled[kCtxCount];
 std::atomic<uint64_t> g_kicks{0};
 bool g_trace = false;
 const char* g_dump_dir = nullptr;  // GOW_XMA_DUMP_DIR: PCM de cada contexto, para análise
-uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0;
+uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0, g_stat_trimmed = 0;
 apu::XmaStream g_streams[kCtxCount];  // estado do descodificador por contexto (host)
 
 volatile LONG* reg(uint32_t i) { return reinterpret_cast<volatile LONG*>(gm::base() + gm::kXmaRegBase + 4 * i); }
@@ -78,6 +78,25 @@ void swap_input(Ctx& c) {
   c.set(0, 20 + cur, 1, 0);
   c.set(4, 31, 1, cur ^ 1);
   c.set(2, 0, 26, 0);
+}
+
+// Quadros que começam em from_bit ou depois (bits a contar do início do pacote) e acabam dentro do pacote. Cada quadro começa
+// com o seu comprimento em 15 bits; first_frame_offset diz onde está o 1º depois do cabeçalho de 32 bits.
+uint32_t read_bits15(const uint8_t* p, uint32_t bit) {
+  uint32_t v = 0;
+  for (uint32_t i = 0; i < 15; i++, bit++) v = v << 1 | ((p[bit >> 3] >> (7 - (bit & 7))) & 1);
+  return v;
+}
+
+uint32_t frames_from(const uint8_t* pkt, uint32_t from_bit) {
+  uint32_t bit = 32 + (((pkt[0] & 3u) << 13) | (pkt[1] << 5) | (pkt[2] >> 3)), n = 0;
+  while (bit + 15 <= kPacketBits) {
+    const uint32_t len = read_bits15(pkt, bit);
+    if (len == 0x7FFF || len < 15 || bit + len > kPacketBits) break;
+    if (bit >= from_bit) n++;
+    bit += len;
+  }
+  return n;
 }
 
 // Uma passagem de descodificação (Work do Xenia).
@@ -137,6 +156,16 @@ void decode(uint32_t i, Ctx& c) {
     const uint8_t* pkt = phys_ptr(c.d[5 + cur]) + packet * kPacketBytes;
     const size_t pcm_before = s.pcm.size(), pos_before = s.pcm_pos;
     apu::xma_decode_packet(s, pkt, channels, rate);
+    // Loop a meio do pacote: o FFmpeg entrega o pacote inteiro, mas os quadros a partir de loop_end já não fazem parte do
+    // loop (até 0,2 s de outro som a cada volta). Retira-os do PCM.
+    if (const uint32_t lc = c.get(0, 12, 8), le = c.get(4, 0, 26); lc && le > c.get(3, 0, 26) && (packet + 1) * kPacketBits > le && !pkt[3]) {
+      const uint32_t drop = frames_from(pkt, le - packet * kPacketBits);
+      const size_t samples = (size_t)drop * 512 * channels, got = s.pcm_pos == pos_before ? s.pcm.size() - pcm_before : s.pcm.size();
+      if (samples && samples <= got) {
+        s.pcm.resize(s.pcm.size() - samples);
+        g_stat_trimmed += drop;
+      }
+    }
     if (const char* dd = g_dump_dir) {
       char name[260];
       std::snprintf(name, sizeof name, "%s/c%03u.pcm", dd, i);
@@ -232,6 +261,7 @@ namespace apu {
 void xma_stats(uint64_t& packets, uint64_t& skips, uint64_t& starved, uint64_t& loops) {
   std::lock_guard<std::mutex> lock(g_mu);
   packets = g_stat_packets, skips = g_stat_skips, starved = g_stat_starved, loops = g_stat_jumps;
+  if (g_trace) std::fprintf(stderr, "[xma] %llu quadros cortados no fim de loops\n", (unsigned long long)g_stat_trimmed);
 }
 
 void xma_init() {
