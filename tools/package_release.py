@@ -17,7 +17,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "0.4.0"
+DEFAULT_VERSION = "0.5.0"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
 FORBIDDEN = re.compile(r"\.(iso|xex|xxx|bik|sav|bin|pdb|log)$|^base_image|^extracted|^generated_src|^user_data", re.I)
@@ -36,8 +36,9 @@ COMO JOGAR
 O jogo abre sem janela de consola e sem log. Em caso de crash escreve gow_crash.log nesta pasta.
 Para ver o log: defina GOW_VERBOSE=1 e abra o gow.exe a partir de uma linha de comandos.
 
-Na 1a abertura o jogo cria aqui a pasta user_data\\ (gravacoes, perfil, cache de shaders). Nas primeiras cenas
-pode haver pequenas paragens enquanto os shaders compilam; da segunda vez ja nao acontece.
+Na 1a abertura o jogo cria aqui a pasta user_data\\ (gravacoes, perfil, cache de shaders). Na 1a entrada em cada
+nivel, o ecra de carregamento fica parado 2 a 3 minutos a preparar os shaders (o titulo da janela mostra quantos
+faltam). Da segunda vez ja nao acontece.
 Requer Windows 10/11 de 64 bits, CPU com AVX2 e placa grafica com Direct3D 12.
 
 CONTROLOS
