@@ -33,6 +33,8 @@ void mount(const std::string& device, const std::filesystem::path& host);
 bool unmount(const std::string& device);
 // Lê o ObjectName (ANSI_STRING*) de um OBJECT_ATTRIBUTES convidado; vazio se não houver.
 std::string object_name(uint8_t* m, uint32_t object_attributes);
+// Quantas leituras de ficheiros o jogo já fez (para saber se está a carregar).
+uint64_t read_count();
 // Chamado por NtClose depois de remover um handle: liberta o ficheiro do host se era o último handle.
 void on_handle_closed(uint32_t object);
 

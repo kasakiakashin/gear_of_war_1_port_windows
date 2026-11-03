@@ -36,6 +36,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "config.h"
@@ -939,20 +940,22 @@ void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_stat
 
 // ---- Shaders ----
 // Compilação FXC em threads de fundo: o FXC demora de 50 ms a vários segundos por shader e parava o processador de
-// comandos ao entrar em áreas novas. Um desenho espera pelo seu shader até gastar o orçamento do frame (GOW_SHADER_WAIT_MS,
-// 120 ms): sem isto, numa cache vazia, as personagens (VS de skinning, até 8 s de FXC) ficavam invisíveis mais tempo. Mais do
-// que isto faz o jogo parar ao andar por áreas novas. Esgotado o orçamento, é saltado, como no modo assíncrono do Xenia.
-// GOW_SYNC_SHADERS=1 compila no momento.
+// comandos ao entrar em áreas novas. A maior parte fica pronta antes de ser precisa (shader_scan_thread). Um desenho cujo shader
+// ainda falte espera até gastar o orçamento do frame (GOW_SHADER_WAIT_MS, 1 s): saltar um passe de ecrã inteiro deixava metade da
+// imagem com o frame antigo. Esgotado o orçamento, é saltado, como no modo assíncrono do Xenia. GOW_SYNC_SHADERS=1 compila no momento.
 struct CompileJob {
-  Compiled* c;
+  Compiled* c;  // nulo: pré-compilação, só para a cache em disco (ver shader_scan_thread)
   std::string name, target;
   std::filesystem::path cache_file;
   std::vector<uint32_t> ucode;
+  std::string hlsl;
 };
 std::mutex g_compile_mu;
 std::condition_variable g_compile_cv;
 std::deque<CompileJob> g_compile_jobs;
 std::atomic<uint32_t> g_compiles_pending{0};
+std::atomic<uint32_t> g_prebuild_left{0};  // pré-compilações por fazer
+std::atomic<uint64_t> g_prebuild_done{0}, g_prebuild_found{0}, g_demand_compiles{0};
 
 void finish_compile(Compiled& c, const std::string& name, const std::filesystem::path& cache_file,
                     const std::vector<uint32_t>& u, std::string err, ULONGLONG dt) {
@@ -980,7 +983,7 @@ void finish_compile(Compiled& c, const std::string& name, const std::filesystem:
 bool wait_for_shader(Compiled& c) {
   static const int budget_ms = [] {
     const char* e = std::getenv("GOW_SHADER_WAIT_MS");
-    return e ? std::atoi(e) : 120;
+    return e ? std::atoi(e) : 1000;
   }();
   const ULONGLONG t0 = GetTickCount64();
   while (c.pending.load(std::memory_order_acquire)) {
@@ -1004,6 +1007,21 @@ void compile_worker() {
       job = std::move(g_compile_jobs.front());
       g_compile_jobs.pop_front();
     }
+    if (!job.c) {
+      std::error_code ec;
+      if (!std::filesystem::exists(job.cache_file, ec)) {
+        std::string ignored;
+        if (ID3DBlob* blob = compile_hlsl(job.hlsl, job.target.c_str(), job.name.c_str(), &ignored)) {
+          std::filesystem::create_directories(job.cache_file.parent_path(), ec);
+          std::ofstream(job.cache_file, std::ios::binary)
+              .write(static_cast<const char*>(blob->GetBufferPointer()), (std::streamsize)blob->GetBufferSize());
+          blob->Release();
+        }
+      }
+      g_prebuild_left.fetch_sub(1);
+      g_prebuild_done.fetch_add(1);
+      continue;
+    }
     std::string err;
     ULONGLONG t0 = GetTickCount64();
     ID3DBlob* blob = compile_hlsl(job.c->info.hlsl, job.target.c_str(), job.name.c_str(), &err);
@@ -1011,6 +1029,116 @@ void compile_worker() {
     finish_compile(*job.c, job.name, job.cache_file, job.ucode, err, GetTickCount64() - t0);
     job.c->pending.store(false, std::memory_order_release);
     g_compiles_pending.fetch_sub(1);
+  }
+}
+
+void start_compile_workers() {
+  static std::once_flag workers;
+  std::call_once(workers, [] {
+    const char* e = std::getenv("GOW_FXC_THREADS");
+    const int hc = (int)std::thread::hardware_concurrency();
+    const int workers_n = e ? std::atoi(e) : std::clamp(hc - 1, 2, 16);  // prioridade abaixo do normal: o jogo passa à frente
+    for (int i = 0; i < workers_n; i++) std::thread(compile_worker).detach();
+  });
+}
+
+// O jogo carrega o microcódigo dos materiais de um mapa para a memória física durante o carregamento, antes do 1º desenho (378 de
+// 379 shaders até ao 1º corredor da prisão já lá estavam). Por isso, enquanto há leituras de ficheiros, varre-se essa memória, reconhece-se
+// o microcódigo pelo fluxo de controle e compila-se para a cache em disco. Muito do que se encontra nunca chega a ser desenhado:
+// é o custo de não falhar nada; só acontece da 1ª vez. GOW_NO_PREBUILD=1 desliga.
+// Fluxo de controle válido em `w` (dwords em ordem do host a ler de `be`, big-endian): devolve o nº de dwords do shader, ou 0.
+uint32_t microcode_size(const uint32_t* be, size_t left, bool* vertex) {
+  uint32_t first = 0xFFFFFFFFu, end = 0, cfs = 0;
+  bool ended = false;
+  *vertex = false;
+  size_t d = 0;
+  while (!ended) {
+    if (d + 3 > left || cfs >= 512) return 0;
+    const uint32_t w0 = _byteswap_ulong(be[d]), w1 = _byteswap_ulong(be[d + 1]), w2 = _byteswap_ulong(be[d + 2]);
+    const uint32_t lo[2] = {w0, (w1 >> 16) | (w2 << 16)}, hi[2] = {w1 & 0xFFFF, w2 >> 16};
+    for (int i = 0; i < 2 && !ended; i++, cfs++) {
+      const uint32_t op = (hi[i] >> 12) & 15;
+      const bool is_exec = op >= 1 && op <= 6 ? true : op == 13 || op == 14;
+      if (is_exec) {
+        const uint32_t addr = lo[i] & 0xFFF, count = (lo[i] >> 12) & 7;
+        const bool last = op == 2 || op == 4 || op == 6 || op == 14;
+        if (!count && !last) return 0;
+        first = std::min(first, addr);
+        end = std::max(end, addr + count);
+        ended = last;
+      } else if (op == 12) {
+        if (((hi[i] >> 9) & 3) == 1) *vertex = true;  // ALLOC de posição: só o VS a faz
+      }
+    }
+    d += 3;
+  }
+  // As instruções começam logo a seguir ao fluxo de controle.
+  if (first == 0xFFFFFFFFu || first * 3 != d || end > 3000) return 0;
+  return end * 3;
+}
+
+void scan_physical_memory(std::unordered_set<uint64_t>& seen) {
+  constexpr uint32_t kBase = 0xA0000000u, kStep = 32;
+  const std::filesystem::path dir = vfs::user_root() / "shader_cache";
+  std::vector<CompileJob> jobs;
+  for (uint32_t off = 0; off < gm::kPhysicalSize;) {
+    gm::RegionInfo info{};
+    if (!gm::query(kBase + off, info) || !info.size) break;
+    const uint32_t region_end = std::min<uint64_t>(gm::kPhysicalSize, (uint64_t)off + info.size);
+    if (info.state == gm::kMemCommit) {
+      const auto* mem = reinterpret_cast<const uint32_t*>(gm::base() + kBase);
+      for (uint32_t o = (off + kStep - 1) & ~(kStep - 1); o + 12 <= region_end; o += kStep) {
+        bool vertex = false;
+        const size_t left = (region_end - o) / 4;
+        const uint32_t n = microcode_size(mem + o / 4, left, &vertex);
+        if (!n || n > left) continue;
+        const uint64_t h = hash_bytes(reinterpret_cast<const uint8_t*>(mem + o / 4), n * 4);
+        if (!seen.insert(h).second) continue;
+        std::vector<uint32_t> u(n);
+        for (uint32_t i = 0; i < n; i++) u[i] = _byteswap_ulong(mem[o / 4 + i]);
+        TranslatedShader t = translate_shader(u, !vertex);
+        if (!t.ok) continue;
+        g_prebuild_found.fetch_add(1);
+        char key[40];
+        std::snprintf(key, sizeof key, "%016llX.dxbc",
+                      (unsigned long long)hash_bytes(reinterpret_cast<const uint8_t*>(t.hlsl.data()), t.hlsl.size()));
+        std::filesystem::path file = dir / key;
+        std::error_code ec;
+        if (std::filesystem::exists(file, ec)) continue;
+        char name[48];
+        std::snprintf(name, sizeof name, "%s_%016llX", vertex ? "vs" : "ps", (unsigned long long)t.hash);
+        jobs.push_back({nullptr, name, vertex ? "vs_5_1" : "ps_5_1", std::move(file), {}, std::move(t.hlsl)});
+      }
+    }
+    off = region_end;
+  }
+  if (jobs.empty()) return;
+  // Vértices primeiro: são os mais lentos e, sem eles, o objeto inteiro não aparece.
+  std::stable_sort(jobs.begin(), jobs.end(), [](const CompileJob& a, const CompileJob& b) { return a.target[0] > b.target[0]; });
+  g_prebuild_left.fetch_add((uint32_t)jobs.size());
+  std::lock_guard<std::mutex> lock(g_compile_mu);
+  for (CompileJob& j : jobs) g_compile_jobs.push_back(std::move(j));
+  g_compile_cv.notify_all();
+}
+
+void shader_scan_thread() {
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  std::unordered_set<uint64_t> seen;
+  uint64_t last = 0;
+  bool again = false;
+  start_compile_workers();
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const uint64_t reads = vfs::read_count();
+    const bool active = reads != last;
+    last = reads;
+    if (!active && !again) continue;
+    again = active;  // mais uma passagem depois de as leituras pararem
+    const auto t0 = std::chrono::steady_clock::now();
+    scan_physical_memory(seen);
+    std::fprintf(stderr, "[d3d12] pré-compilação: varrimento em %lld ms, %llu shaders encontrados, %u por compilar\n",
+                 (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(),
+                 (unsigned long long)g_prebuild_found.load(), g_prebuild_left.load());
   }
 }
 
@@ -1052,18 +1180,14 @@ Compiled* shader(bool pixel) {
   static const bool sync = std::getenv("GOW_SYNC_SHADERS") != nullptr;
   const bool cached = c.blob != nullptr;
   if (c.info.ok && !c.blob && !sync) {
-    static std::once_flag workers;
-    std::call_once(workers, [] {
-      const char* e = std::getenv("GOW_FXC_THREADS");
-      const int hc = (int)std::thread::hardware_concurrency();
-      const int workers_n = e ? std::atoi(e) : std::clamp(hc - 2, 2, 6);
-      for (int i = 0; i < workers_n; i++) std::thread(compile_worker).detach();
-    });
+    start_compile_workers();
     c.pending = true;
     g_compiles_pending.fetch_add(1);
     {
       std::lock_guard<std::mutex> lock(g_compile_mu);
-      g_compile_jobs.push_back({&c, name, pixel ? "ps_5_1" : "vs_5_1", cache_file, u});
+      // À frente das pré-compilações: este desenho está à espera.
+      g_compile_jobs.push_front({&c, name, pixel ? "ps_5_1" : "vs_5_1", cache_file, u, {}});
+      g_demand_compiles.fetch_add(1);
     }
     g_compile_cv.notify_one();
     return wait_for_shader(c) && c.blob ? &c : nullptr;
@@ -1650,6 +1774,7 @@ bool init() {
   if (const char* e = std::getenv("GOW_RESOLVE_TO_MEMORY"); e && *e == '1') g.resolve_to_memory = true;
   if (const char* e = std::getenv("GOW_TRACE_RENDER"); e && *e) g.trace = true, g.trace_frame = std::strtoull(e, nullptr, 10);
   g.active = init_device();
+  if (g.active && !std::getenv("GOW_NO_PREBUILD")) std::thread(shader_scan_thread).detach();
   std::fprintf(stderr, "[d3d12] renderer %s\n", g.active ? "ativo (janela 1280×720)" : "desligado");
   return g.active;
 }
@@ -2078,6 +2203,21 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
 void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t fetch[6]) {
   if (!g.active) return;
   g.swaps++;
+  // Ecrãs de carregamento (poucos desenhos) com pré-compilação por fazer: espera aqui, com o progresso no título, em vez de entrar
+  // no nível com shaders em falta. Em jogo nunca espera: o que falta compila em fundo e passa à frente quando um desenho o pede.
+  // GOW_NO_PREBUILD_WAIT=1 desliga.
+  static const bool prebuild_wait = !std::getenv("GOW_NO_PREBUILD_WAIT");
+  if (prebuild_wait && g.draws < 400 && g_prebuild_left.load()) {
+    const auto t0 = std::chrono::steady_clock::now();
+    while (const uint32_t left = g_prebuild_left.load()) {
+      char t[160];
+      std::snprintf(t, sizeof t, "Gears of War (recompilado) - a preparar shaders antes de entrar: faltam %u (só da 1.ª vez)", left);
+      window::set_title(t);
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    std::fprintf(stderr, "[d3d12] pré-compilação: carregamento parado %.1f s à espera dos shaders\n",
+                 std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());
+  }
   // A janela mudou de tamanho (arrasto, Alt+Enter): GPU parada, sem referências, e ResizeBuffers.
   uint32_t cw = 0, ch = 0;
   window::client_size(cw, ch);
@@ -2158,14 +2298,19 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     g.stat_worst_ms = std::max(g.stat_worst_ms, ms);
     if (ms > 50.0f) g.stat_slow_frames++;
   }
+  if (g.frame % 30 == 0 && g_prebuild_left.load()) {
+    char t[128];
+    std::snprintf(t, sizeof t, "Gears of War (recompilado) - a preparar shaders: faltam %u (s\u00f3 da 1.\u00aa vez)", g_prebuild_left.load());
+    window::set_title(t);
+  }
   if (g.frame % 120 == 0) {
     char title_[160];
     std::snprintf(title_, sizeof title_, "Gears of War (recompilado) - frame %llu, %u desenhos, %u resolves",
                   (unsigned long long)g.frame, g.draws, g.resolves);
     window::set_title((title_ + net::status()).c_str());
-    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames; pior frame %.0f ms, %u acima de 50 ms\n",
+    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames; pior frame %.0f ms, %u acima de 50 ms; shaders: %llu pedidos por desenhos, %u por pré-compilar\n",
                  (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
-                 g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates, g.stat_worst_ms, g.stat_slow_frames);
+                 g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates, g.stat_worst_ms, g.stat_slow_frames, (unsigned long long)g_demand_compiles.load(), g_prebuild_left.load());
     g.stat_worst_ms = 0;
     g.stat_slow_frames = 0;
     g.stat_submits = g.stat_creates = 0;

@@ -83,6 +83,7 @@ bool env_flag(const char* name) {
   return e && *e == '1';
 }
 const bool g_trace = env_flag("GOW_TRACE_FILES");
+std::atomic<uint64_t> g_read_count{0};
 
 // Handle de ficheiro inválido: regista (com backtrace) a 1ª ocorrência, que costuma apontar a causa.
 std::shared_ptr<File> bad_handle(uint32_t handle) {
@@ -294,6 +295,8 @@ void queue_io_apc(const PPCContext& ctx) {
 
 }  // namespace
 
+uint64_t vfs::read_count() { return g_read_count.load(std::memory_order_relaxed); }
+
 void vfs::on_handle_closed(uint32_t object) {
   std::shared_ptr<File> f;
   {
@@ -322,6 +325,7 @@ XBOX_IMPORT(NtOpenFile) {
 // NtReadFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext, PIO_STATUS_BLOCK, PVOID Buffer,
 //            ULONG Length, PLARGE_INTEGER ByteOffset)
 XBOX_IMPORT(NtReadFile) {
+  g_read_count.fetch_add(1, std::memory_order_relaxed);
   auto f = file_of(arg(ctx, 0));
   if (!f) return ret_status(ctx, kStatusInvalidHandle);
   if (f->dir) return ret_status(ctx, kStatusInvalidParameter);
