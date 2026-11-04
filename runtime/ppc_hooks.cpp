@@ -131,6 +131,10 @@ void trace_ufunc(const PPCContext& ctx) {
 
 void ppc_call_indirect(PPCContext& ctx, uint8_t* mem_base, uint32_t target) {
   if (g_ufunc_limit) trace_ufunc(ctx);
+  // _cfltcvt(double*, buf, size, fmt, precision, caps) chamado pelo _woutput da CRT do jogo: guardado para o relatório de crash.
+  if ((uint32_t)ctx.lr == 0x828DCEC4u)
+    diag::note_float_format(mem_base, (uint32_t)ctx.r[3], (uint32_t)ctx.r[4], (uint32_t)ctx.r[5], (uint32_t)ctx.r[6],
+                            (uint32_t)ctx.r[7], ctx.r[1], ctx.lr);
   if (const VcallTrace& vt = vcall_trace(); vt.on) {
     uint32_t lr = (uint32_t)ctx.lr;
     bool root = std::find(vt.lrs.begin(), vt.lrs.end(), lr) != vt.lrs.end();

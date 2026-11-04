@@ -32,6 +32,7 @@ add_executable(gow
   kernel/strings.cpp
   kernel/timer.cpp
   kernel/apc.cpp
+  kernel/printf_test.cpp
   xam/xam_notify.cpp
   xam/xam_user.cpp
   xam/xam_input.cpp

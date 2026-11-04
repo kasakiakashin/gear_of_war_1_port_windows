@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "gpu/gpu.h"
+#include "kernel/printf_test.h"
 #include "gpu/window.h"
 #include "kernel/kernel.h"
 #include "kernel/thread.h"
@@ -262,6 +263,7 @@ XBOX_IMPORT(XamInputGetCapabilities) {
 // XamInputGetState(DWORD UserIndex, DWORD Flags, X_INPUT_STATE* State)
 // X_INPUT_STATE (0x10): u32 PacketNumber, X_INPUT_GAMEPAD {u16 Buttons; u8 LT, RT; s16 LX, LY, RX, RY}.
 XBOX_IMPORT(XamInputGetState) {
+  kernel::run_guest_printf_test(ctx);  // GOW_TEST_PRINTF=1 (uma vez, com a CRT do jogo já iniciada)
   uint32_t user = user_of(arg(ctx, 0)), st = arg(ctx, 2);
   static const bool trace = std::getenv("GOW_TRACE_INPUT") != nullptr;
   if (trace) {
