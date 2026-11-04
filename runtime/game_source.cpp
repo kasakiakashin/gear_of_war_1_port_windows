@@ -32,6 +32,8 @@ namespace game_source {
 namespace {
 
 fs::path g_arg_iso, g_arg_image;
+std::vector<std::wstring> g_args;  // linha de comandos sem o nome do programa
+bool g_located = false;
 
 std::wstring to_wide(const std::string& s) {
   std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0), L'\0');
@@ -155,37 +157,76 @@ bool read_file(const fs::path& path, std::vector<uint8_t>* out) {
 void init_working_dir() {
   int argc = 0;
   if (wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
-    if (argc > 1) {
-      std::error_code ec;
-      const fs::path p = fs::absolute(argv[1], ec);
-      (_wcsicmp(p.extension().c_str(), L".iso") == 0 ? g_arg_iso : g_arg_image) = p;
-    }
+    for (int i = 1; i < argc; i++) g_args.push_back(argv[i]);
     LocalFree(argv);
+  }
+  // O 1º argumento que não é uma opção (--…) é a ISO ou a imagem base; o valor de --pack também não conta.
+  for (size_t i = 0; i < g_args.size(); i++) {
+    if (g_args[i].rfind(L"--", 0) == 0) {
+      if (g_args[i] == L"--pack") i++;
+      continue;
+    }
+    std::error_code ec;
+    const fs::path p = fs::absolute(g_args[i], ec);
+    (_wcsicmp(p.extension().c_str(), L".iso") == 0 ? g_arg_iso : g_arg_image) = p;
+    break;
   }
   std::error_code ec;
   if (fs::exists("gow_config.ini", ec) || fs::exists(vfs::game_root(), ec)) return;
   fs::current_path(exe_dir(), ec);
 }
 
-bool prepare(std::vector<uint8_t>* image) {
+bool locate(bool interactive) {
+  if (g_located) return true;
   std::string error;
   const char* env_iso = std::getenv("GOW_ISO");
   const fs::path forced = !g_arg_iso.empty() ? g_arg_iso : env_iso && *env_iso ? fs::path(to_wide(env_iso)) : fs::path();
   if (!forced.empty() && !try_iso(forced, &error)) {
-    tell(L"Não foi possível usar a imagem " + forced.wstring() + L": " + to_wide(error));
+    if (interactive) tell(L"Não foi possível usar a imagem " + forced.wstring() + L": " + to_wide(error));
     return false;
   }
   const std::string& saved = config::get().iso_path;
   if (forced.empty() && !saved.empty() && !try_iso(to_wide(saved), &error))
     std::fprintf(stderr, "[gow] IsoPath ignorado (%s): %s\n", saved.c_str(), error.c_str());
-
   if (!iso::mounted() && !loose_game_complete()) {
     std::error_code ec;
     const fs::path cwd = fs::current_path(ec), exe = exe_dir();
-    if (!search_folder(cwd) && (exe == cwd || !search_folder(exe)) && !choose_with_dialog()) {
-      tell(L"O jogo não foi encontrado. Coloque a ISO do Gears of War 1 na pasta do gow.exe, ou selecione-a ao abrir o jogo.");
-      return false;
-    }
+    if (!search_folder(cwd) && (exe == cwd || !search_folder(exe)) && !(interactive && choose_with_dialog())) return false;
+  }
+  g_located = true;
+  return true;
+}
+
+bool choose_iso() {
+  if (!choose_with_dialog()) return false;
+  g_located = true;
+  return true;
+}
+
+std::wstring status() {
+  if (iso::mounted())
+    return L"ISO: " + (config::get().iso_path.empty() ? std::wstring(L"encontrada na pasta do jogo") : to_wide(config::get().iso_path));
+  if (loose_game_complete()) return L"Pasta extracted\\ (ficheiros soltos)";
+  return L"Jogo não encontrado: selecione a ISO do Gears of War 1 (Xbox 360).";
+}
+
+bool has_flag(const wchar_t* name) {
+  for (const std::wstring& a : g_args)
+    if (_wcsicmp(a.c_str(), name) == 0) return true;
+  return false;
+}
+
+std::wstring option(const wchar_t* name) {
+  for (size_t i = 0; i + 1 < g_args.size(); i++)
+    if (_wcsicmp(g_args[i].c_str(), name) == 0) return g_args[i + 1];
+  return {};
+}
+
+bool prepare(std::vector<uint8_t>* image) {
+  std::string error;
+  if (!locate(true)) {
+    tell(L"O jogo não foi encontrado. Coloque a ISO do Gears of War 1 na pasta do gow.exe, ou selecione-a ao abrir o jogo.");
+    return false;
   }
 
   // GOW_ISO_VERIFY=pasta: ferramenta de desenvolvimento, sai logo a seguir.

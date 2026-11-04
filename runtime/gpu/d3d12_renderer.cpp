@@ -42,11 +42,13 @@
 #include "config.h"
 #include "net/tunnel.h"
 #include "gpu/renderer.h"
+#include "gpu/shader_compile.h"
 #include "gpu/texture.h"
 #include "gpu/window.h"
 #include "gpu/xenos_shader.h"
 #include "guest_memory.h"
 #include "kernel/vfs.h"
+#include "shader_prep.h"
 
 namespace gpu::render {
 namespace {
@@ -471,22 +473,7 @@ uint32_t sampler_alloc(uint32_t n) {
 // O FXC tem erros internos ("internal error: l-value expected") que dependem das passagens de otimização:
 // tenta o nível 1 e, se falhar, sem otimização e com o nível 3.
 ID3DBlob* compile_hlsl(const std::string& src, const char* target, const char* name, std::string* err) {
-  static const UINT kFlags[] = {D3DCOMPILE_OPTIMIZATION_LEVEL1, D3DCOMPILE_SKIP_OPTIMIZATION,
-                                D3DCOMPILE_OPTIMIZATION_LEVEL3};
-  for (UINT flags : kFlags) {
-    ID3DBlob *code = nullptr, *errors = nullptr;
-    HRESULT hr = g.compile(src.data(), src.size(), name, nullptr, nullptr, "main", target, flags, 0, &code, &errors);
-    if (errors) {
-      if (err && FAILED(hr)) err->assign((const char*)errors->GetBufferPointer(), errors->GetBufferSize());
-      errors->Release();
-    }
-    if (SUCCEEDED(hr)) {
-      if (flags != kFlags[0]) std::fprintf(stderr, "[d3d12] %s compilou com flags 0x%X\n", name, flags);
-      return code;
-    }
-    if (code) code->Release();
-  }
-  return nullptr;
+  return gpu::compile_hlsl(src, target, name, err);
 }
 
 // ---- Texturas do host ----
@@ -807,21 +794,22 @@ bool create_roots() {
   cbv(2, 1, D3D12_SHADER_VISIBILITY_ALL);
   cbv(3, 2, D3D12_SHADER_VISIBILITY_ALL);
   cbv(4, 3, D3D12_SHADER_VISIBILITY_ALL);
-  for (int i = 0; i < 9; i++) {  // t0 (índices) + t1..t8 (vértices), space1
+  for (int i = 0; i < 2; i++) {  // t0 = índices, t1 = anel de upload inteiro (vértices), space1
     p[5 + i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     p[5 + i].Descriptor.ShaderRegister = i;
     p[5 + i].Descriptor.RegisterSpace = 1;
     p[5 + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
   }
+  cbv(7, 4, D3D12_SHADER_VISIBILITY_VERTEX);  // xe_vf
   D3D12_DESCRIPTOR_RANGE srv{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 32, 0, 0, 0};
   D3D12_DESCRIPTOR_RANGE smp{D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 32, 0, 0, 0};
-  p[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  p[14].DescriptorTable = {1, &srv};
-  p[14].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  p[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  p[15].DescriptorTable = {1, &smp};
-  p[15].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  D3D12_ROOT_SIGNATURE_DESC rd{16, p, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  p[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  p[8].DescriptorTable = {1, &srv};
+  p[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  p[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  p[9].DescriptorTable = {1, &smp};
+  p[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  D3D12_ROOT_SIGNATURE_DESC rd{10, p, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   ID3DBlob *blob = nullptr, *err = nullptr;
   if (FAILED(g.serialize_rs(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err))) {
     std::fprintf(stderr, "[d3d12] root signature: %s\n", err ? (const char*)err->GetBufferPointer() : "?");
@@ -1046,36 +1034,6 @@ void start_compile_workers() {
 // 379 shaders até ao 1º corredor da prisão já lá estavam). Por isso, enquanto há leituras de ficheiros, varre-se essa memória, reconhece-se
 // o microcódigo pelo fluxo de controle e compila-se para a cache em disco. Muito do que se encontra nunca chega a ser desenhado:
 // é o custo de não falhar nada; só acontece da 1ª vez. GOW_NO_PREBUILD=1 desliga.
-// Fluxo de controle válido em `w` (dwords em ordem do host a ler de `be`, big-endian): devolve o nº de dwords do shader, ou 0.
-uint32_t microcode_size(const uint32_t* be, size_t left, bool* vertex) {
-  uint32_t first = 0xFFFFFFFFu, end = 0, cfs = 0;
-  bool ended = false;
-  *vertex = false;
-  size_t d = 0;
-  while (!ended) {
-    if (d + 3 > left || cfs >= 512) return 0;
-    const uint32_t w0 = _byteswap_ulong(be[d]), w1 = _byteswap_ulong(be[d + 1]), w2 = _byteswap_ulong(be[d + 2]);
-    const uint32_t lo[2] = {w0, (w1 >> 16) | (w2 << 16)}, hi[2] = {w1 & 0xFFFF, w2 >> 16};
-    for (int i = 0; i < 2 && !ended; i++, cfs++) {
-      const uint32_t op = (hi[i] >> 12) & 15;
-      const bool is_exec = op >= 1 && op <= 6 ? true : op == 13 || op == 14;
-      if (is_exec) {
-        const uint32_t addr = lo[i] & 0xFFF, count = (lo[i] >> 12) & 7;
-        const bool last = op == 2 || op == 4 || op == 6 || op == 14;
-        if (!count && !last) return 0;
-        first = std::min(first, addr);
-        end = std::max(end, addr + count);
-        ended = last;
-      } else if (op == 12) {
-        if (((hi[i] >> 9) & 3) == 1) *vertex = true;  // ALLOC de posição: só o VS a faz
-      }
-    }
-    d += 3;
-  }
-  // As instruções começam logo a seguir ao fluxo de controle.
-  if (first == 0xFFFFFFFFu || first * 3 != d || end > 3000) return 0;
-  return end * 3;
-}
 
 void scan_physical_memory(std::unordered_set<uint64_t>& seen) {
   constexpr uint32_t kBase = 0xA0000000u, kStep = 32;
@@ -1090,7 +1048,7 @@ void scan_physical_memory(std::unordered_set<uint64_t>& seen) {
       for (uint32_t o = (off + kStep - 1) & ~(kStep - 1); o + 12 <= region_end; o += kStep) {
         bool vertex = false;
         const size_t left = (region_end - o) / 4;
-        const uint32_t n = microcode_size(mem + o / 4, left, &vertex);
+        const uint32_t n = gpu::microcode_size(mem + o / 4, left, &vertex);
         if (!n || n > left) continue;
         const uint64_t h = hash_bytes(reinterpret_cast<const uint8_t*>(mem + o / 4), n * 4);
         if (!seen.insert(h).second) continue;
@@ -1168,13 +1126,10 @@ Compiled* shader(bool pixel) {
   std::filesystem::path cache_file;
   if (c.info.ok) {
 
-    char key[40];
-    std::snprintf(key, sizeof key, "%016llX.dxbc",
-                  (unsigned long long)hash_bytes(reinterpret_cast<const uint8_t*>(c.info.hlsl.data()), c.info.hlsl.size()));
-    cache_file = vfs::user_root() / "shader_cache" / key;
-    std::ifstream in(cache_file, std::ios::binary);
-    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (!bytes.empty() && g.create_blob && SUCCEEDED(g.create_blob(bytes.size(), &c.blob)))
+    cache_file = shader_cache_file(c.info.hlsl);
+    std::vector<char> bytes;
+    if (shader_prep::load_cached(shader_cache_key(c.info.hlsl), &bytes) && g.create_blob &&
+        SUCCEEDED(g.create_blob(bytes.size(), &c.blob)))
       std::memcpy(c.blob->GetBufferPointer(), bytes.data(), bytes.size());
   }
   static const bool sync = std::getenv("GOW_SYNC_SHADERS") != nullptr;
@@ -1188,6 +1143,16 @@ Compiled* shader(bool pixel) {
       // À frente das pré-compilações: este desenho está à espera.
       g_compile_jobs.push_front({&c, name, pixel ? "ps_5_1" : "vs_5_1", cache_file, u, {}});
       g_demand_compiles.fetch_add(1);
+    }
+    // GOW_TRACE_DEMAND=1: microcódigo dos shaders que a preparação não encontrou, em frames/demand/ (BE, como na memória).
+    static const bool trace_demand = std::getenv("GOW_TRACE_DEMAND") != nullptr;
+    if (trace_demand) {
+      std::error_code ec;
+      std::filesystem::create_directories("frames/demand", ec);
+      std::vector<uint32_t> be(u);
+      for (uint32_t& w : be) w = __builtin_bswap32(w);
+      std::ofstream(std::string("frames/demand/") + name + ".bin", std::ios::binary)
+          .write(reinterpret_cast<const char*>(be.data()), (std::streamsize)(be.size() * 4));
     }
     g_compile_cv.notify_one();
     return wait_for_shader(c) && c.blob ? &c : nullptr;
@@ -1440,7 +1405,6 @@ struct SysConstants {
   float vp_scale[4], vp_offset[4], rt[4];
   uint32_t flags[4];
   float alpha_ref[4];
-  uint32_t vb_size[8];
   float tex_size[32][4];
   float rt_scale[4];  // 2^color_exp_bias de cada RT (RB_COLOR*_INFO bits 20..25, com sinal)
   float rt_max[4];    // 31,875 nos RT 2_10_10_10_FLOAT (7e3); 0 nos outros
@@ -1774,7 +1738,10 @@ bool init() {
   if (const char* e = std::getenv("GOW_RESOLVE_TO_MEMORY"); e && *e == '1') g.resolve_to_memory = true;
   if (const char* e = std::getenv("GOW_TRACE_RENDER"); e && *e) g.trace = true, g.trace_frame = std::strtoull(e, nullptr, 10);
   g.active = init_device();
-  if (g.active && !std::getenv("GOW_NO_PREBUILD")) std::thread(shader_scan_thread).detach();
+  // Cache por preparar (sem launcher): a mesma preparação a partir dos pacotes do disco, em fundo. GOW_SCAN_MEMORY=1 junta o
+  // varrimento do microcódigo na memória depois de cada carregamento.
+  if (g.active && !std::getenv("GOW_NO_PREBUILD") && !shader_prep::up_to_date()) shader_prep::start();
+  if (g.active && std::getenv("GOW_SCAN_MEMORY")) std::thread(shader_scan_thread).detach();
   std::fprintf(stderr, "[d3d12] renderer %s\n", g.active ? "ativo (janela 1280×720)" : "desligado");
   return g.active;
 }
@@ -2094,10 +2061,21 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   if (g.dummy.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) transition(g.dummy, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
   // Buffers de vértices
   pf_desc.stop();
-  D3D12_GPU_VIRTUAL_ADDRESS vbs[8] = {};
+  // xe_vf: por vfetch (VS de formatos lidos em tempo de execução) ou por slot (formatos fixos), {palavra 1, palavra 2,
+  // deslocamento do stream no anel, tamanho | endian << 30}.
+  uint32_t vf[kMaxBoundVfetch * 4] = {};
+  uint32_t vf_entries = 0;
+  const D3D12_GPU_VIRTUAL_ADDRESS ring_base = g.upload->GetGPUVirtualAddress();
   Prof pf_vb(kProfVertex);
-  for (size_t i = 0; i < vs->info.vfetch_slots.size() && i < 8; i++) {
-    uint32_t slot = vs->info.vfetch_slots[i];
+  uint32_t stream_slot[8], stream_off[8], stream_size[8], streams = 0;
+  // Copia (ou reaproveita) os vértices de um slot de fetch para o anel; devolve o deslocamento e tamanho | endian << 30.
+  auto stream = [&](uint32_t slot, uint32_t* off, uint32_t* size_endian) {
+    for (uint32_t s = 0; s < streams; s++)
+      if (stream_slot[s] == slot) {
+        *off = stream_off[s], *size_endian = stream_size[s];
+        return;
+      }
+    D3D12_GPU_VIRTUAL_ADDRESS va = 0;
     const uint32_t* f = cr + (kConstFetch - 0x4000) + slot * 2;
     uint32_t addr = f[0] & ~3u, size = ((f[1] >> 2) & 0xFFFFFF) * 4;
     size = std::min<uint32_t>(size, 64u << 20);
@@ -2115,14 +2093,42 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     }
     auto it = g.vb_cache.find(vkey);
     if (!no_vb_cache && it != g.vb_cache.end() && it->second.hash == vhash) {
-      vbs[i] = it->second.va;
+      va = it->second.va;
     } else {
       if (it != g.vb_cache.end()) g.vb_stale++;
-      uint8_t* p = upload_alloc(std::max<uint32_t>(size, 16), 256, &vbs[i]);
+      uint8_t* p = upload_alloc(std::max<uint32_t>(size, 16), 256, &va);
       if (p && size) std::memcpy(p, physical(addr), size);
-      if (p) g.vb_cache[vkey] = {vbs[i], vhash};
+      if (p) g.vb_cache[vkey] = {va, vhash};
+      else size = 0;
     }
-    sys.vb_size[i] = size;
+    *off = va ? (uint32_t)(va - ring_base) : 0;
+    *size_endian = std::min<uint32_t>(size, 0x3FFFFFFFu) | (f[1] & 3) << 30;
+    if (streams < 8) stream_slot[streams] = slot, stream_off[streams] = *off, stream_size[streams] = *size_endian, streams++;
+  };
+  if (vs->info.bound_vfetch) {
+    // Os mini-fetch (palavra 1, bit 30) usam o stream, o passo e o arredondamento do último vfetch completo.
+    uint32_t full_d1 = 0, full_d2 = 0, full_slot = 95;
+    for (size_t k = 0; k < vs->info.vfetch_at.size() && k < kMaxBoundVfetch; k++) {
+      const uint32_t at = vs->info.vfetch_at[k];
+      if (at + 2 >= g.vs_ucode.size()) break;
+      const uint32_t d0 = g.vs_ucode[at];
+      uint32_t d1 = g.vs_ucode[at + 1], d2 = g.vs_ucode[at + 2];
+      if (!(d1 & 0x40000000u)) {
+        full_d1 = d1, full_d2 = d2, full_slot = ((d0 >> 20) & 31) * 3 + ((d0 >> 25) & 3);
+      } else {
+        d1 = (d1 & ~0x8000u) | (full_d1 & 0x8000u);
+        d2 = (d2 & ~0xFFu) | (full_d2 & 0xFFu);
+      }
+      uint32_t* e = &vf[4 * k];
+      e[0] = d1, e[1] = d2;
+      stream(full_slot, &e[2], &e[3]);
+      vf_entries = (uint32_t)k + 1;
+    }
+  } else {
+    for (size_t i = 0; i < vs->info.vfetch_slots.size() && i < kMaxBoundVfetch; i++) {
+      stream(vs->info.vfetch_slots[i], &vf[4 * i + 2], &vf[4 * i + 3]);
+      vf_entries = (uint32_t)i + 1;
+    }
   }
   pf_vb.stop();
   Prof pf_const(kProfConst);
@@ -2138,6 +2144,9 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   std::memcpy(bl + 8, cr + (kConstLoop - 0x4000), 32 * 4);
   D3D12_GPU_VIRTUAL_ADDRESS cb_bools = upload_cb(bl, sizeof bl);
   D3D12_GPU_VIRTUAL_ADDRESS cb_sys = upload_cb(&sys, sizeof sys);
+  // O cbuffer declara as 64 entradas: reserva-as todas, copia só as usadas.
+  D3D12_GPU_VIRTUAL_ADDRESS cb_vf = 0;
+  if (uint8_t* p = upload_alloc(sizeof vf, 256, &cb_vf)) std::memcpy(p, vf, (size_t)vf_entries * 16);
   if (!idx_va) {
     uint8_t* ip = upload_alloc(host.size() * 4, 256, &idx_va);
     if (!ip) return;
@@ -2155,9 +2164,10 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   g.list->SetGraphicsRootConstantBufferView(3, cb_bools);
   g.list->SetGraphicsRootConstantBufferView(4, cb_sys);
   g.list->SetGraphicsRootShaderResourceView(5, idx_va);
-  for (int i = 0; i < 8; i++) g.list->SetGraphicsRootShaderResourceView(6 + i, vbs[i] ? vbs[i] : idx_va);
-  g.list->SetGraphicsRootDescriptorTable(14, gpu_handle(g.srv_heap, g.srv_inc, srv_base));
-  g.list->SetGraphicsRootDescriptorTable(15, gpu_handle(g.sampler_heap, g.sampler_inc, smp_base));
+  g.list->SetGraphicsRootShaderResourceView(6, ring_base);
+  g.list->SetGraphicsRootConstantBufferView(7, cb_vf);
+  g.list->SetGraphicsRootDescriptorTable(8, gpu_handle(g.srv_heap, g.srv_inc, srv_base));
+  g.list->SetGraphicsRootDescriptorTable(9, gpu_handle(g.sampler_heap, g.sampler_inc, smp_base));
   g.list->OMSetRenderTargets(st.num_rt, st.num_rt ? rtvs : nullptr, FALSE, depth ? &depth->dsv : nullptr);
   float bf[4] = {regf(kRbBlendRed), regf(kRbBlendRed + 1), regf(kRbBlendRed + 2), regf(kRbBlendRed + 3)};
   g.list->OMSetBlendFactor(bf);
@@ -2200,20 +2210,118 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   }
 }
 
+// Ecrã de espera dos shaders: texto e barra desenhados com GDI numa textura, que vai para o centro do backbuffer (no lugar do
+// ecrã preto com o progresso só no título). Apresenta logo; o frame do jogo segue depois.
+void present_progress(const wchar_t* line, float frac) {
+  constexpr int W = 760, H = 150;
+  static Texture tex;
+  static HFONT title_font = nullptr, text_font = nullptr;
+  if (!tex.res && !create_texture(tex, W, H, DXGI_FORMAT_B8G8R8A8_UNORM, false, false)) return;
+  if (!title_font) {
+    title_font = CreateFontW(-34, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI");
+    text_font = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI");
+  }
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = W;
+  bmi.bmiHeader.biHeight = -H;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  void* bits = nullptr;
+  HDC dc = CreateCompatibleDC(nullptr);
+  HBITMAP bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (!bmp) {
+    DeleteDC(dc);
+    return;
+  }
+  HGDIOBJ old_bmp = SelectObject(dc, bmp);
+  auto fill = [&](RECT r, COLORREF c) {
+    HBRUSH b = CreateSolidBrush(c);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+  };
+  fill({0, 0, W, H}, RGB(0, 0, 0));
+  SetBkMode(dc, TRANSPARENT);
+  HGDIOBJ old_font = SelectObject(dc, title_font);
+  SetTextColor(dc, RGB(205, 32, 42));
+  RECT r{0, 0, W, 50};
+  DrawTextW(dc, L"GEARS OF WAR", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  SelectObject(dc, text_font);
+  SetTextColor(dc, RGB(236, 232, 230));
+  r = {0, 58, W, 88};
+  DrawTextW(dc, line, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  const RECT track{40, 104, W - 40, 122};
+  fill(track, RGB(52, 46, 47));
+  RECT bar = track;
+  bar.right = track.left + (LONG)((track.right - track.left) * std::clamp(frac, 0.0f, 1.0f));
+  fill(bar, RGB(165, 18, 28));
+  SetTextColor(dc, RGB(162, 154, 152));
+  r = {0, 128, W, H};
+  DrawTextW(dc, L"Só da primeira vez: as próximas aberturas usam a cache.", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  GdiFlush();
+  DecodedTexture d;
+  d.width = W, d.height = H, d.row_pitch = W * 4, d.rows = H;
+  d.data.assign(static_cast<uint8_t*>(bits), static_cast<uint8_t*>(bits) + (size_t)W * H * 4);
+  for (size_t i = 3; i < d.data.size(); i += 4) d.data[i] = 255;
+  SelectObject(dc, old_font);
+  SelectObject(dc, old_bmp);
+  DeleteObject(bmp);
+  DeleteDC(dc);
+
+  const uint32_t bi = g.swapchain->GetCurrentBackBufferIndex();
+  ID3D12Resource* bb = g.backbuffers[bi];
+  D3D12_RESOURCE_STATES bb_state = D3D12_RESOURCE_STATE_PRESENT;
+  const D3D12_CPU_DESCRIPTOR_HANDLE rtv = cpu_handle(g.rtv_heap, g.rtv_inc, bi);
+  upload_texture(tex, d);
+  transition(bb, bb_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  const float black[4] = {0, 0, 0, 1};
+  g.list->ClearRenderTargetView(rtv, black, 0, nullptr);
+  const float k = std::max(0.5f, std::min(g.bb_w / 1280.0f, g.bb_h / 720.0f));
+  const float dw = std::round(W * k), dh = std::round(H * k);
+  blit(tex, bb, bb_state, rtv, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0, W, H, std::floor((g.bb_w - dw) / 2), std::floor((g.bb_h - dh) / 2),
+       dw, dh, true, kColor, true);
+  static bool dump_progress = std::getenv("GOW_DUMP_PROGRESS") != nullptr;  // 1.º ecrã de espera em frames/progress.bmp
+  if (dump_progress) {
+    dump_progress = false;
+    std::error_code ec;
+    std::filesystem::create_directories("frames", ec);
+    dump_rgba(bb, bb_state, "frames/progress.bmp");
+  }
+  transition(bb, bb_state, D3D12_RESOURCE_STATE_PRESENT);
+  submit();
+  g.swapchain->Present(1, 0);
+}
+
 void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t fetch[6]) {
   if (!g.active) return;
   g.swaps++;
-  // Ecrãs de carregamento (poucos desenhos) com pré-compilação por fazer: espera aqui, com o progresso no título, em vez de entrar
-  // no nível com shaders em falta. Em jogo nunca espera: o que falta compila em fundo e passa à frente quando um desenho o pede.
-  // GOW_NO_PREBUILD_WAIT=1 desliga.
+  // Ecrãs com poucos desenhos (título, carregamento) e shaders ainda a preparar (a preparação do launcher que continuou no jogo,
+  // ou o varrimento da memória): espera aqui com uma barra no ecrã, em vez de entrar no nível com shaders em falta. Em jogo
+  // nunca espera: o que falta compila em fundo e passa à frente quando um desenho o pede. GOW_NO_PREBUILD_WAIT=1 desliga.
   static const bool prebuild_wait = !std::getenv("GOW_NO_PREBUILD_WAIT");
-  if (prebuild_wait && g.draws < 400 && g_prebuild_left.load()) {
+  if (prebuild_wait && g.draws < 400 && (g_prebuild_left.load() || shader_prep::running())) {
     const auto t0 = std::chrono::steady_clock::now();
-    while (const uint32_t left = g_prebuild_left.load()) {
-      char t[160];
-      std::snprintf(t, sizeof t, "Gears of War (recompilado) - a preparar shaders antes de entrar: faltam %u (só da 1.ª vez)", left);
-      window::set_title(t);
-      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    for (;;) {
+      wchar_t line[160];
+      float frac = 0.0f;
+      if (shader_prep::running()) {
+        const shader_prep::Progress p = shader_prep::progress();
+        if (p.stage == shader_prep::Progress::kCompiling && p.to_compile) {
+          frac = 0.25f + 0.75f * p.compiled / p.to_compile;
+          swprintf(line, 160, L"Otimizando shaders para DirectX 12: %u / %u (%u%%)", p.compiled, p.to_compile, 100 * p.compiled / p.to_compile);
+        } else {
+          frac = p.packages_total ? 0.25f * p.packages_done / p.packages_total : 0.0f;
+          swprintf(line, 160, L"A procurar shaders nos pacotes do jogo: %u / %u", p.packages_done, p.packages_total);
+        }
+      } else if (const uint32_t left = g_prebuild_left.load()) {
+        const uint64_t done = g_prebuild_done.load();
+        frac = (float)done / (float)(done + left);
+        swprintf(line, 160, L"Otimizando shaders do nível para DirectX 12: faltam %u", left);
+      } else {
+        break;
+      }
+      present_progress(line, frac);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     std::fprintf(stderr, "[d3d12] pré-compilação: carregamento parado %.1f s à espera dos shaders\n",
                  std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());

@@ -6,6 +6,8 @@ add_executable(gow
   keybinds.cpp
   language.cpp
   game_source.cpp
+  launcher.cpp
+  shader_prep.cpp
   guest_memory.cpp
   loader.cpp
   ppc_hooks.cpp
@@ -46,6 +48,7 @@ add_executable(gow
   gpu/command_processor.cpp
   gpu/window.cpp
   gpu/xenos_shader.cpp
+  gpu/shader_compile.cpp
   gpu/texture.cpp
   gpu/d3d12_renderer.cpp
 )

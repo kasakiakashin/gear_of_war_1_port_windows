@@ -1,5 +1,6 @@
 // main.cpp — gow.exe: carrega o default.xex recompilado e executa o entry point do convidado.
-//   gow.exe [base_image.bin | jogo.iso]          (sem argumentos: ver game_source.cpp)
+//   gow.exe [base_image.bin | jogo.iso] [--skip-launcher]   (sem argumentos: ver game_source.cpp)
+//   gow.exe --prepare-shaders [--pack ficheiro]
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
@@ -15,6 +16,8 @@
 #include "apu/apu.h"
 #include "config.h"
 #include "game_source.h"
+#include "launcher.h"
+#include "shader_prep.h"
 #include "net/tunnel.h"
 #include "guest_memory.h"
 #include "kernel/diag.h"
@@ -128,9 +131,19 @@ int main(int argc, char** argv) {
   raise_timer_resolution();
   game_source::init_working_dir();
   config::get();  // cria o gow_config.ini se não existir
+  // gow.exe --prepare-shaders [--pack prebuilt_shaders.bin]: compila os shaders do disco e sai (usado pelo package_release.py).
+  if (game_source::has_flag(L"--prepare-shaders")) {
+    if (!game_source::locate(false)) return 1;
+    return shader_prep::run_cli(game_source::option(L"--pack"));
+  }
+  net::start_from_config();
+  const char* skip = std::getenv("GOW_SKIP_LAUNCHER");
+  const char* no_dialogs = std::getenv("GOW_NO_DIALOGS");
+  if (!game_source::has_flag(L"--skip-launcher") && !(skip && *skip == '1') && !(no_dialogs && *no_dialogs == '1') &&
+      !launcher::run())
+    return 0;
   std::vector<uint8_t> image;
   if (!game_source::prepare(&image)) return 1;
-  net::start_from_config();
   if (!gm::init()) {
     std::fprintf(stderr, "[gow] falha ao reservar 4 GiB para o convidado\n");
     return 1;

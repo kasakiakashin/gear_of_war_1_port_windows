@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <set>
 
@@ -39,7 +40,6 @@ cbuffer XeSystem : register(b3) {
   float4 xe_rt;          // x = 2/largura, y = 2/altura, zw = deslocamento da janela
   uint4 xe_flags;        // x = PA_CL_VTE_CNTL, y = alpha test (func | enable << 3), z = param_gen (reg | 0x100), w = VGT_INDX_OFFSET
   float4 xe_alpha_ref;
-  uint4 xe_vb_size[2];
   float4 xe_tex_size[32];
   float4 xe_rt_scale;    // 2^color_exp_bias por RT
   float4 xe_rt_max;      // > 0: o formato real do RT é 7e3 (limitado a [0, 31,875]), guardado aqui em 16 bits float
@@ -67,6 +67,46 @@ float xe_conv(uint v, uint n, uint fl) {
   }
   if (fl & 2u) return (float)v;
   return (float)v / (float)((1u << n) - 1u);
+}
+// vfetch com o formato lido em tempo de execução (palavra 1: formato 16..21, sinal/inteiro/fração 12..14, expoente 24..29).
+// Tabela por formato: largura de cada componente (6 bits cada, 0 = ausente) e o tipo (24..: 0 = inteiro normalizado, 1 = half,
+// 2 = float, 3 = inteiro de 32 bits). Um ciclo genérico em vez de um ramo por formato: o FXC compila-o depressa.
+static const uint xe_vfmt[64] = {
+  0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x208208u, 0x8A28Au,
+  0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u,
+  0xA2CBu, 0xB2CAu, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u,
+  0x0u, 0x410u, 0x410410u, 0x0u, 0x0u, 0x0u, 0x0u, 0x1000410u,
+  0x1410410u, 0x3000020u, 0x3000820u, 0x3820820u, 0x2000020u, 0x2000820u, 0x2820820u, 0x0u,
+  0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u,
+  0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u,
+  0x0u, 0x2020820u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u
+};
+float4 xe_vdecode(uint4 vw, uint d1) {
+  const uint e = xe_vfmt[(d1 >> 16) & 63u], kind = e >> 24, fl = (d1 >> 12) & 7u;
+  const int ea = (int)(d1 << 2) >> 26;
+  const float sc = (kind == 0u || kind == 3u) && ea != 0 ? exp2((float)ea) : 1.0;
+  float x[4] = {0.0, 0.0, 0.0, 1.0};
+  uint o = 0u;
+  [unroll] for (uint c = 0u; c < 4u; c++) {
+    const uint n = (e >> (6u * c)) & 63u;
+    if (n != 0u) {
+      const uint wi = o >> 5;
+      const uint word = wi == 0u ? vw.x : wi == 1u ? vw.y : wi == 2u ? vw.z : vw.w;
+      const uint raw = n == 32u ? word : (word >> (o & 31u)) & ((1u << n) - 1u);
+      x[c] = sc * (kind == 1u ? f16tof32(raw) : kind == 2u ? asfloat(raw) : kind == 3u ? ((fl & 1u) ? (float)(int)raw : (float)raw)
+                                                                                         : xe_conv(raw, n, fl));
+      o += n;
+    }
+  }
+  return float4(x[0], x[1], x[2], x[3]);
+}
+// Swizzle de destino do vfetch (palavra 1, 3 bits por componente): 0..3 = componente, 4/6 = 0, 5 = 1, 7 = mantém.
+float xe_vsel(float4 v, float old, uint c) {
+  return c == 0u ? v.x : c == 1u ? v.y : c == 2u ? v.z : c == 3u ? v.w : c == 5u ? 1.0 : c == 7u ? old : 0.0;
+}
+float4 xe_vswz(float4 v, float4 old, uint d1) {
+  return float4(xe_vsel(v, old.x, d1 & 7u), xe_vsel(v, old.y, (d1 >> 3) & 7u), xe_vsel(v, old.z, (d1 >> 6) & 7u),
+                xe_vsel(v, old.w, (d1 >> 9) & 7u));
 }
 // Modo de cada canal na constante de fetch (dword 0, 2 bits por canal a partir do bit 2): 0 = sem sinal, 1 = com sinal (as cópias HDR da
 // cena, em vírgula flutuante, vêm assim: o valor fica como está),
@@ -130,7 +170,7 @@ enum CfOp { kNop = 0, kExec, kExecEnd, kCondExec, kCondExecEnd, kCondExecPred, k
 
 class Translator {
  public:
-  Translator(const std::vector<uint32_t>& u, bool pixel) : u_(u), pixel_(pixel) {}
+  Translator(const std::vector<uint32_t>& u, bool pixel, bool bound) : u_(u), pixel_(pixel), bound_(bound && !pixel) {}
 
   TranslatedShader run() {
     TranslatedShader out;
@@ -147,6 +187,8 @@ class Translator {
     out.ok = error_.empty();
     out.error = error_;
     out.vfetch_slots = vslots_;
+    out.vfetch_at = vfetch_at_;
+    out.bound_vfetch = bound_;
     out.texture_mask = tex_mask_;
     out.cube_mask = cube_mask_;
     for (int k = 0; k < 4; k++) out.const_used[k] = const_used_[k];
@@ -163,6 +205,8 @@ class Translator {
  private:
   const std::vector<uint32_t>& u_;
   bool pixel_;
+  bool bound_;  // VS: formato, passo, deslocamento e swizzle dos vfetch vêm de xe_vf (o D3D muda-os ao ligar a declaração)
+  std::vector<uint32_t> vfetch_at_;
   std::vector<Cf> cfs_;
   std::string error_;
   std::vector<uint32_t> vslots_;
@@ -455,7 +499,31 @@ class Translator {
     return r;
   }
 
+  // O D3D do Xbox escreve na memória, ao ligar a declaração de vértices, o formato, o passo, o deslocamento, os modos de
+  // conversão, a swizzle de destino e o slot da constante de fetch de cada vfetch, e transforma em mini-fetch os seguintes do
+  // mesmo stream: no disco estão todos no slot 95, a zero. Só se fixam no HLSL o registo de índice e o destino; o resto vem
+  // de xe_vf[k] = {palavra 1, palavra 2, deslocamento do stream no anel de upload, tamanho | endian << 30}, preenchido pelo
+  // renderer a partir do microcódigo real. O mesmo VS serve qualquer declaração e pode ser compilado a partir do disco.
+  std::string emit_vfetch_bound(const uint32_t* w) {
+    const uint32_t d0 = w[0];
+    const uint32_t k = (uint32_t)vfetch_at_.size();
+    vfetch_at_.push_back((uint32_t)(w - u_.data()));
+    std::string s = "    {\n";
+    s += fmt("      uint4 vd = xe_vf[%u];\n", k);
+    s += fmt("      float vi_ = r[%u].%c;\n", bits(d0, 5, 6), kComp[bits(d0, 30, 2)]);
+    s += "      int vn_ = (vd.x & 0x8000u) ? (int)round(vi_) : (int)floor(vi_);\n";
+    s += "      uint vbase = (uint)(vn_ * (int)(vd.y & 0xFFu) + (int)((vd.y >> 8) & 0x7FFFFFu)) * 4u;\n";
+    s += "      uint vsz = vd.w & 0x3FFFFFFFu, ve = vd.w >> 30;\n";
+    s += "      uint4 vw = uint4(0, 0, 0, 0);\n";
+    for (uint32_t i = 0; i < 4; i++)
+      s += fmt("      if (vbase + %u <= vsz) vw.%c = xe_swap(xe_ring.Load(vd.z + vbase + %u), ve);\n", i * 4 + 4, kComp[i], i * 4);
+    s += "      float4 fv = xe_vdecode(vw, vd.x);\n";
+    s += rmw(dest_reg(bits(d0, 12, 6), bits(d0, 18, 1)), " t_ = xe_vswz(fv, t_, vd.x);");
+    return s + "    }\n";
+  }
+
   std::string emit_vfetch(const uint32_t* w) {
+    if (bound_) return emit_vfetch_bound(w);
     uint32_t d0 = w[0], d1 = w[1], d2 = w[2];
     bool mini = bits(d1, 30, 1);
     uint32_t dst = bits(d0, 12, 6), fmt_ = bits(d1, 16, 6);
@@ -484,9 +552,9 @@ class Translator {
     s += fmt("      uint vbase = (uint)(%s * %u + %u) * 4u;\n", last_index_.c_str(), last_stride_, offset);
     s += fmt("      uint ve = xe_fetch_dw(%u) & 3u;\n", last_slot_ * 2 + 1);
     s += fmt("      uint4 vw = uint4(0, 0, 0, 0);\n");
-    s += fmt("      if (vbase + %u <= xe_vb_size[%d >> 2][%d & 3]) {\n", words * 4, reg, reg);
+    s += fmt("      if (vbase + %u <= (xe_vf[%d].w & 0x3FFFFFFFu)) {\n", words * 4, reg);
     for (uint32_t i = 0; i < words; i++)
-      s += fmt("        vw.%c = xe_swap(vb%d.Load(vbase + %u), ve);\n", kComp[i], reg, i * 4);
+      s += fmt("        vw.%c = xe_swap(xe_ring.Load(xe_vf[%d].z + vbase + %u), ve);\n", kComp[i], reg, i * 4);
     s += "      }\n";
     std::string v;
     auto unpack = [&](const int* widths, int n) {
@@ -725,7 +793,10 @@ class Translator {
     std::string h = kPrelude;
     if (!pixel_) {
       h += "ByteAddressBuffer xe_idx : register(t0, space1);\n";
-      for (size_t i = 0; i < vslots_.size(); i++) h += fmt("ByteAddressBuffer vb%zu : register(t%zu, space1);\n", i, i + 1);
+      // Vértices: todos no anel de upload; xe_vf diz onde está cada stream (ver emit_vfetch_bound; nos VS de formatos fixos,
+      // uma entrada por slot em vfetch_slots).
+      h += "ByteAddressBuffer xe_ring : register(t1, space1);\n";
+      h += fmt("cbuffer XeVfetch : register(b4) { uint4 xe_vf[%zu]; };\n", kMaxBoundVfetch);
       h += "struct VSRaw { float4 pos; float4 o[16]; float4 misc; };\n";
       h += "struct VSOut { float4 pos : SV_Position; float4 o[16] : TEXCOORD0; };\n";
       h += "VSRaw xe_run(uint vertex_index) {\n  VSRaw o = (VSRaw)0;\n";
@@ -813,7 +884,13 @@ uint64_t hash_words(const uint32_t* w, size_t n) {
 }
 
 TranslatedShader translate_shader(const std::vector<uint32_t>& ucode, bool pixel) {
-  return Translator(ucode, pixel).run();
+  // GOW_BAKED_VFETCH=1: formatos dos vfetch fixos no HLSL (um VS por declaração, como antes).
+  static const bool baked = std::getenv("GOW_BAKED_VFETCH") != nullptr;
+  if (!pixel && !baked) {
+    TranslatedShader t = Translator(ucode, pixel, true).run();
+    if (t.vfetch_at.size() <= kMaxBoundVfetch) return t;
+  }
+  return Translator(ucode, pixel, false).run();
 }
 
 }  // namespace gpu

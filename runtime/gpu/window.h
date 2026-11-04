@@ -40,6 +40,8 @@ namespace menu {
 bool is_open();
 void toggle(void* owner_hwnd);        // abre/fecha
 bool pre_translate(void* msg);        // true se a mensagem foi tratada pelo menu
+// Painel de configurações dentro de outra janela (launcher), com as mesmas abas e o mesmo estado.
+void* create_embedded(void* parent_hwnd, int x, int y);
 }  // namespace menu
 
 }  // namespace window

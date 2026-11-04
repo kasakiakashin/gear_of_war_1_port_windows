@@ -25,6 +25,8 @@ struct TranslatedShader {
   uint64_t hash = 0;            // do microcódigo
   std::string hlsl, error;
   std::vector<uint32_t> vfetch_slots;  // VS: slots de fetch de vértices usados (0..95), na ordem dos registradores
+  std::vector<uint32_t> vfetch_at;     // VS: dword de cada vfetch no microcódigo (entrada k de xe_vf)
+  bool bound_vfetch = false;           // VS: formatos e slots dos vfetch lidos de xe_vf (senão, fixos; xe_vf por slot)
   uint32_t texture_mask = 0;    // PS: constantes de fetch de textura usadas (bit k)
   uint32_t cube_mask = 0;       // PS: dessas, as amostradas como cube map (TextureCube)
   // PS: filtro pedido pela própria instrução tfetch, por constante: mag | min << 2 | mip << 4 (0 = ponto, 1 = linear,
@@ -36,6 +38,7 @@ struct TranslatedShader {
   uint32_t alu_count = 0, fetch_count = 0, cf_count = 0;
 };
 
+constexpr size_t kMaxBoundVfetch = 64;  // tamanho de xe_vf; acima disto o VS fica com os formatos fixos
 TranslatedShader translate_shader(const std::vector<uint32_t>& ucode, bool pixel);
 uint64_t hash_words(const uint32_t* w, size_t n);
 

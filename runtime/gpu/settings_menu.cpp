@@ -48,6 +48,7 @@ HWND g_menu = nullptr;
 HFONT g_font = nullptr, g_bold = nullptr, g_title = nullptr, g_mono = nullptr;
 HBRUSH g_back = nullptr, g_panel = nullptr, g_field = nullptr;
 bool g_recapture = false;
+bool g_embedded = false;  // dentro do launcher: sem botão Fechar, F8 e Esc não fecham
 int g_tab = 0;
 std::vector<HWND> g_controls[kTabs];
 int g_build_tab = 0;
@@ -120,8 +121,11 @@ void update_preview(HWND h) {
   uint32_t cw = 0, ch = 0;
   window::client_size(cw, ch);
   wchar_t b[128];
-  swprintf(b, 128, L"Render interno: %d × %d px   |   Janela: %u × %u px", (int)std::lround(1280 * c.resolution_scale),
-           (int)std::lround(720 * c.resolution_scale), cw, ch);
+  if (cw && ch)
+    swprintf(b, 128, L"Render interno: %d × %d px   |   Janela: %u × %u px", (int)std::lround(1280 * c.resolution_scale),
+             (int)std::lround(720 * c.resolution_scale), cw, ch);
+  else
+    swprintf(b, 128, L"Render interno: %d × %d px", (int)std::lround(1280 * c.resolution_scale), (int)std::lround(720 * c.resolution_scale));
   SetDlgItemTextW(h, kScalePreview, b);
 }
 
@@ -301,7 +305,7 @@ void build(HWND h) {
   build_controls(h);
   build_multiplayer(h);
   g_build_tab = -1;
-  ShowWindow(GetDlgItem(h, kClose), SW_SHOW);
+  ShowWindow(GetDlgItem(h, kClose), g_embedded ? SW_HIDE : SW_SHOW);
   for (int t = 0; t < kTabs; t++) ShowWindow(GetDlgItem(h, kTabFirst + t), SW_SHOW);
   update_preview(h);
   g_shown_code.clear();
@@ -322,11 +326,11 @@ void paint(HWND h) {
   HGDIOBJ old = SelectObject(dc, g_title);
   SetTextColor(dc, kCrimsonHot);
   RECT title{kContentLeft, 12, 460, 46};
-  DrawTextW(dc, L"GEARS OF WAR", -1, &title, DT_SINGLELINE | DT_VCENTER);
+  DrawTextW(dc, g_embedded ? L"CONFIGURAÇÕES" : L"GEARS OF WAR", -1, &title, DT_SINGLELINE | DT_VCENTER);
   SelectObject(dc, g_font);
   SetTextColor(dc, kDim);
   RECT sub{kWidth - 420, 12, kWidth - 18, 46};
-  DrawTextW(dc, L"Configurações  |  aplicadas em tempo real", -1, &sub, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+  DrawTextW(dc, g_embedded ? L"Aplicadas em tempo real, também no F8" : L"Configurações  |  aplicadas em tempo real", -1, &sub, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
   HPEN pen = CreatePen(PS_SOLID, 1, kLine);
   HGDIOBJ old_pen = SelectObject(dc, pen);
   for (const Panel& p : g_panels) {
@@ -569,6 +573,7 @@ LRESULT CALLBACK menu_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       KillTimer(h, kTimer);
       g_capturing = -1;
       g_menu = nullptr;
+      g_embedded = false;
       return 0;
   }
   return DefWindowProcW(h, msg, wp, lp);
@@ -627,6 +632,14 @@ void toggle(void* owner_ptr) {
   SetFocus(GetDlgItem(g_menu, kTabFirst + g_tab));
 }
 
+void* create_embedded(void* parent_ptr, int x, int y) {
+  init_once();
+  g_embedded = true;
+  g_menu = CreateWindowExW(WS_EX_CONTROLPARENT, L"GowMenu", L"", WS_CHILD | WS_VISIBLE, x, y, kWidth, kHeight - 40,
+                           static_cast<HWND>(parent_ptr), nullptr, GetModuleHandleW(nullptr), nullptr);
+  return g_menu;
+}
+
 bool pre_translate(void* msg_ptr) {
   MSG* m = static_cast<MSG*>(msg_ptr);
   if (!g_menu) return false;
@@ -647,7 +660,7 @@ bool pre_translate(void* msg_ptr) {
     }
     if (m->message == WM_KEYUP || m->message == WM_SYSKEYUP || m->message == WM_LBUTTONUP || m->message == WM_RBUTTONUP) return true;
   }
-  if (m->message == WM_KEYDOWN && mine && (m->wParam == VK_F8 || m->wParam == VK_ESCAPE)) {
+  if (m->message == WM_KEYDOWN && mine && !g_embedded && (m->wParam == VK_F8 || m->wParam == VK_ESCAPE)) {
     if (!(m->lParam & (1 << 30))) toggle(GetWindow(g_menu, GW_OWNER));
     return true;
   }
