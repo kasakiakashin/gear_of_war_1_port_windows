@@ -25,7 +25,7 @@ namespace {
 
 enum Id {
   kTabFirst = 100,  // 100..103
-  kScale = 110, kScalePreview, kFullscreen, kFsr, kStrength, kStrengthText, kVsync, kFpsLimit,
+  kScale = 110, kScalePreview, kFullscreen, kFsr, kStrength, kStrengthText, kVsync, kFpsLimit, kAdaptiveFps,
   kVolume = 130, kVolumeText, kLanguage, kLanguageNote,
   kMouse = 150, kMouseText, kInvertY, kRestoreKeys, kKeysNote,
   kKeyFirst = 200,  // 200..200+kActionCount
@@ -200,6 +200,8 @@ void build_video(HWND h) {
     if (kFpsChoices[i] == c.fps_limit) fps_sel = i;
   }
   SendDlgItemMessageW(h, kFpsLimit, CB_SETCURSEL, fps_sel, 0);
+  y += 42;
+  check(h, L"FPS adaptativo (desce para metade se a cena não aguentar)", kAdaptiveFps, x, y, 600, c.adaptive_fps);
 }
 
 void build_audio(HWND h) {
@@ -465,6 +467,9 @@ void command(HWND h, int id, int code) {
     config::save();
   } else if (id == kVsync && code == BN_CLICKED) {
     c.vsync = IsDlgButtonChecked(h, kVsync) == BST_CHECKED;
+    config::save();
+  } else if (id == kAdaptiveFps && code == BN_CLICKED) {
+    c.adaptive_fps = IsDlgButtonChecked(h, kAdaptiveFps) == BST_CHECKED;
     config::save();
   } else if (id == kInvertY && code == BN_CLICKED) {
     c.invert_y = IsDlgButtonChecked(h, kInvertY) == BST_CHECKED;

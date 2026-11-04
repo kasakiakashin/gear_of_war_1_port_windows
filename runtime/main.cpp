@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "gpu/gpu.h"
+#include "gpu/renderer.h"
 #include "apu/apu.h"
 #include "config.h"
 #include "game_source.h"
@@ -178,6 +179,7 @@ int main(int argc, char** argv) {
       gpu::dump_state();
       peek();
       memdump();
+      gpu::render::save_caches();
       std::_Exit(3);
     }).detach();
   }

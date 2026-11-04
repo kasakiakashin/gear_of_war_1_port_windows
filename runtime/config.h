@@ -14,6 +14,7 @@ struct Config {
   float volume = 1.0f;     // 0..1
   bool vsync = false;      // sincroniza a apresentação com o monitor
   int fps_limit = 60;      // 30 = ritmo do Xbox 360; 0 = ilimitado
+  bool adaptive_fps = true;  // limite ≥ 60 que a cena não aguenta: 30 FPS estáveis em vez de solavancos
   bool invert_y = false;   // rato: eixo Y invertido
   uint16_t keys[keybinds::kActionCount];  // VK por ação
   Config() {

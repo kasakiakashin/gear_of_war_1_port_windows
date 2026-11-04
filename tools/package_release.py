@@ -22,10 +22,11 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "0.6.0"
+DEFAULT_VERSION = "0.7.0"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
-SHADER_PACK = "prebuilt_shaders.bin"  # a única exceção ao .bin de FORBIDDEN
+SHADER_PACK = "prebuilt_shaders.bin"  # exceções ao .bin de FORBIDDEN
+PSO_LIST = "prebuilt_psos.bin"  # lista de PSOs (chaves dos shaders + estado), pré-criados em fundo no arranque
 FORBIDDEN = re.compile(r"\.(iso|xex|xxx|bik|sav|bin|pdb|log)$|^base_image|^extracted|^generated_src|^user_data", re.I)
 
 LEIAME = """Gears of War 1 - port PC (recompilacao estatica) v{version}
@@ -105,6 +106,7 @@ def main():
     ap.add_argument("--shaders", help="prebuilt_shaders.bin já feito com este mesmo gow.exe (senão é gerado agora)")
     ap.add_argument("--no-shaders", action="store_true", help="sem prebuilt_shaders.bin")
     ap.add_argument("--user-dir", help="GOW_USER_DIR com a cache de shaders de uma preparação anterior (não é apagado)")
+    ap.add_argument("--psos", help="pso_list.bin gravado a jogar (user_data/shader_cache/), incluído como prebuilt_psos.bin")
     args = ap.parse_args()
 
     exe = os.path.join(args.build_dir, "gow.exe")
@@ -135,6 +137,8 @@ def main():
             sys.exit(f"gow.exe --prepare-shaders falhou ({r.returncode}); use --shaders ficheiro ou --no-shaders")
     if args.no_shaders and os.path.isfile(pack):
         os.remove(pack)
+    if args.psos:
+        shutil.copy2(args.psos, os.path.join(out, PSO_LIST))
     for d in FFMPEG_DLLS:
         shutil.copy2(os.path.join(args.build_dir, "ffmpeg", d), os.path.join(out, "ffmpeg", d))
     with open(os.path.join(out, "gow_config.ini"), "w", encoding="ascii", newline="") as f:
@@ -146,7 +150,7 @@ def main():
     for base, _, names in os.walk(out):
         for n in names:
             rel = os.path.relpath(os.path.join(base, n), out)
-            if rel != SHADER_PACK and (FORBIDDEN.search(n) or FORBIDDEN.search(rel)):
+            if rel not in (SHADER_PACK, PSO_LIST) and (FORBIDDEN.search(n) or FORBIDDEN.search(rel)):
                 sys.exit(f"recusado: {rel} parece dados do jogo")
             packed.append(rel)
 

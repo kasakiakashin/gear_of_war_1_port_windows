@@ -32,6 +32,8 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -67,7 +69,7 @@ enum : uint32_t {
   kVgtIndxOffset = 0x2102, kVgtMultiPrimIbResetIndx = 0x2103, kRbColorMask = 0x2104, kRbBlendRed = 0x2105,
   kRbStencilRefMask = 0x210D, kRbAlphaRef = 0x210E, kPaClVportXscale = 0x210F, kSqProgramCntl = 0x2180,
   kSqContextMisc = 0x2181, kRbDepthControl = 0x2200, kRbBlendControl0 = 0x2201, kRbColorControl = 0x2202,
-  kPaSuPolyOffsetFrontScale = 0x2380, kPaSuScModeCntl = 0x2205, kPaClVteCntl = 0x2206, kRbModeControl = 0x2208, kRbBlendControl1 = 0x2209,
+  kPaSuPolyOffsetFrontScale = 0x2380, kPaClClipCntl = 0x2204, kPaSuScModeCntl = 0x2205, kPaClVteCntl = 0x2206, kRbModeControl = 0x2208, kRbBlendControl1 = 0x2209,
   kSqVsConst = 0x2307, kSqPsConst = 0x2308, kRbCopyControl = 0x2318, kRbCopyDestBase = 0x2319,
   kRbCopyDestPitch = 0x231A, kRbCopyDestInfo = 0x231B, kRbDepthClear = 0x231D, kRbColorClear = 0x231E,
   kConstAlu = 0x4000, kConstFetch = 0x4800, kConstBool = 0x4900, kConstLoop = 0x4908,
@@ -114,6 +116,7 @@ struct RtKey {
 struct Compiled {
   TranslatedShader info;
   ID3DBlob* blob = nullptr;
+  uint64_t cache_key = 0;  // gpu::shader_cache_key do HLSL (chave do prebuilt_shaders.bin e da lista de PSOs)
   std::atomic<bool> pending{false};  // FXC a correr numa thread de fundo (o desenho é saltado até acabar)
 };
 
@@ -247,6 +250,28 @@ struct Prof {
     g_prof[cat] += prof_ms(t1.QuadPart - t0.QuadPart);
   }
   ~Prof() { stop(); }
+};
+
+// Custos raros mas pesados do frame atual (sempre medidos: são poucos por frame). Um frame lento (> 40 ms) é registado com a
+// divisão em modo verboso: diz se o pico veio de PSOs, shaders, texturas, recursos ou de fora do renderer (o jogo).
+enum HitchCat { kHitchPso, kHitchShader, kHitchTexture, kHitchResource, kHitchCount };
+const char* const kHitchNames[kHitchCount] = {"PSOs", "shaders", "texturas", "recursos"};
+struct HitchStat {
+  double ms = 0;
+  uint32_t n = 0;
+};
+HitchStat g_hitch[kHitchCount], g_hitch_total[kHitchCount];
+uint32_t g_last_draws = 0;  // desenhos do frame anterior (poucos = ecrã de carregamento ou menu: aí espera-se por tudo)
+struct HitchTimer {
+  HitchCat cat;
+  LARGE_INTEGER t0;
+  explicit HitchTimer(HitchCat c) : cat(c) { QueryPerformanceCounter(&t0); }
+  ~HitchTimer() {
+    LARGE_INTEGER t1;
+    QueryPerformanceCounter(&t1);
+    g_hitch[cat].ms += prof_ms(t1.QuadPart - t0.QuadPart);
+    g_hitch[cat].n++;
+  }
 };
 
 void warn_once(const std::string& key, const char* fmt, ...) {
@@ -496,6 +521,7 @@ bool create_texture(Texture& t, uint32_t w, uint32_t h, DXGI_FORMAT f, bool rend
   t.state = depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                   : render_target ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COPY_DEST;
   g.stat_creates++;
+  HitchTimer ht(kHitchResource);
   HRESULT hr = g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, t.state,
                                                  (render_target || depth) ? &cv : nullptr, IID_PPV_ARGS(&t.res));
   if (FAILED(hr)) {
@@ -676,12 +702,15 @@ Texture* texture_for(const TextureFetch& f) {
   }
   std::vector<DecodedTexture> levels;
   Phase ph("descodificação de textura");
-  if (!decode_texture_mips(gm::base(), f, levels)) {
-    warn_once("fmt" + std::to_string(f.format()), "[d3d12] formato de textura %u não suportado\n", f.format());
-    return &g.dummy;
-  }
   uint64_t h = 0;
-  for (const DecodedTexture& lv : levels) h = h * 31 + hash_bytes(lv.data.data(), lv.data.size());
+  {
+    HitchTimer ht(kHitchTexture);
+    if (!decode_texture_mips(gm::base(), f, levels)) {
+      warn_once("fmt" + std::to_string(f.format()), "[d3d12] formato de textura %u não suportado\n", f.format());
+      return &g.dummy;
+    }
+    for (const DecodedTexture& lv : levels) h = h * 31 + hash_bytes(lv.data.data(), lv.data.size());
+  }
   const DecodedTexture& d = levels[0];
   if (t.res && t.mips != levels.size()) g.garbage.push_back(t.res), t.res = nullptr, t.hash = 0;
   if (!t.res && !create_texture(t, d.width, d.height, (DXGI_FORMAT)d.dxgi, false, false, (uint32_t)levels.size()))
@@ -969,13 +998,16 @@ void finish_compile(Compiled& c, const std::string& name, const std::filesystem:
 }
 
 bool wait_for_shader(Compiled& c) {
+  // Em jogo, no máximo 30 ms por frame: um shader que não está no pacote demora 1–8 s no FXC, e esperar mais não o faz chegar
+  // mais cedo (com 1 s por frame a imagem ficava a 1 FPS durante a compilação). Nos ecrãs de carregamento e menus espera-se tudo.
   static const int budget_ms = [] {
     const char* e = std::getenv("GOW_SHADER_WAIT_MS");
-    return e ? std::atoi(e) : 1000;
+    return e ? std::atoi(e) : 30;
   }();
+  const int budget = g_last_draws < 400 ? (1 << 30) : budget_ms;
   const ULONGLONG t0 = GetTickCount64();
   while (c.pending.load(std::memory_order_acquire)) {
-    if ((int)(GetTickCount64() - t0) + g.shader_wait_ms >= budget_ms) {
+    if ((int)(GetTickCount64() - t0) + g.shader_wait_ms >= budget) {
       g.shader_wait_ms += (int)(GetTickCount64() - t0);
       return false;
     }
@@ -1111,6 +1143,7 @@ Compiled* shader(bool pixel) {
     return it->second.blob ? &it->second : nullptr;
   }
   Compiled& c = g.shaders[h];
+  std::optional<HitchTimer> ht(std::in_place, kHitchShader);
   c.info = translate_shader(u, pixel);
   char name[48];
   std::snprintf(name, sizeof name, "%s_%016llX", pixel ? "ps" : "vs", (unsigned long long)c.info.hash);
@@ -1125,13 +1158,14 @@ Compiled* shader(bool pixel) {
   // Cache em disco do bytecode, pelo hash do HLSL gerado (mudanças no tradutor invalidam-na sozinhas).
   std::filesystem::path cache_file;
   if (c.info.ok) {
-
     cache_file = shader_cache_file(c.info.hlsl);
+    c.cache_key = shader_cache_key(c.info.hlsl);
     std::vector<char> bytes;
-    if (shader_prep::load_cached(shader_cache_key(c.info.hlsl), &bytes) && g.create_blob &&
+    if (shader_prep::load_cached(c.cache_key, &bytes) && g.create_blob &&
         SUCCEEDED(g.create_blob(bytes.size(), &c.blob)))
       std::memcpy(c.blob->GetBufferPointer(), bytes.data(), bytes.size());
   }
+  ht.reset();
   static const bool sync = std::getenv("GOW_SYNC_SHADERS") != nullptr;
   const bool cached = c.blob != nullptr;
   if (c.info.ok && !c.blob && !sync) {
@@ -1204,24 +1238,300 @@ struct DrawState {
   DXGI_FORMAT dsv = DXGI_FORMAT_UNKNOWN;
   uint32_t blend[4] = {}, color_mask = 0, depth_control = 0, stencil = 0;
   uint32_t cull = 0;  // PA_SU_SC_MODE_CNTL bits 0..2: cull_front, cull_back, face (1 = frente CW)
+  uint32_t depth_clip = 1;  // !PA_CL_CLIP_CNTL.clip_disable; rect lists nunca (são de ecrã)
   int32_t depth_bias = 0;   // PA_SU_POLY_OFFSET em unidades de D24
   uint32_t slope_bits = 0;  // idem, declive (bits do float, para a chave do PSO)
   D3D12_PRIMITIVE_TOPOLOGY_TYPE topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 };
 
+// ---- Cache persistente de PSOs (ID3D12PipelineLibrary) ----
+// Criar um PSO obriga o driver a compilar o DXBC para a GPU (5–50 ms cada; ao entrar numa zona nova são ~100 de uma vez: um
+// pico de 200 ms ou mais). A biblioteca guarda o resultado compilado em user_data/shader_cache/pipelines.bin: da 2.ª vez o PSO
+// sai do disco em menos de 1 ms. O conteúdo é do driver: outra placa ou outra versão do driver recusa o ficheiro e começa vazia.
+// O nome de cada entrada junta a chave do estado e as somas de verificação do DXBC, por isso shaders mudados nunca reaproveitam
+// uma entrada antiga (o runtime também recusa uma descrição diferente da gravada).
+struct PsoLibrary {
+  ID3D12Device1* dev1 = nullptr;
+  ID3D12PipelineLibrary* lib = nullptr;
+  std::vector<char> blob;  // tem de viver enquanto a biblioteca existir
+  std::mutex mu;
+  uint32_t loaded = 0, created = 0;
+  std::atomic<uint32_t> unsaved{0};
+  std::chrono::steady_clock::time_point last_save = std::chrono::steady_clock::now();
+};
+PsoLibrary g_pso_lib;
+
+std::filesystem::path pso_library_file() { return vfs::user_root() / "shader_cache" / "pipelines.bin"; }
+
+void open_pso_library() {
+  PsoLibrary& L = g_pso_lib;
+  if (std::getenv("GOW_NO_PSO_CACHE") || FAILED(g.device->QueryInterface(IID_PPV_ARGS(&L.dev1)))) return;
+  {
+    std::ifstream in(pso_library_file(), std::ios::binary);
+    if (in) L.blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  HRESULT hr = L.blob.empty() ? E_FAIL : L.dev1->CreatePipelineLibrary(L.blob.data(), L.blob.size(), IID_PPV_ARGS(&L.lib));
+  if (FAILED(hr)) {
+    if (!L.blob.empty())
+      std::fprintf(stderr, "[d3d12] cache de PSOs recusada pelo driver (0x%08lX): começa vazia\n", (unsigned long)hr);
+    L.blob.clear();
+    hr = L.dev1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&L.lib));
+  }
+  if (FAILED(hr)) {
+    std::fprintf(stderr, "[d3d12] ID3D12PipelineLibrary indisponível (0x%08lX): PSOs sem cache em disco\n", (unsigned long)hr);
+    L.lib = nullptr;
+    return;
+  }
+  std::fprintf(stderr, "[d3d12] cache de PSOs: %zu KB lidos de %s\n", L.blob.size() / 1024, pso_library_file().string().c_str());
+}
+
+void save_pso_library() {
+  PsoLibrary& L = g_pso_lib;
+  std::vector<char> out;
+  {
+    std::lock_guard<std::mutex> lock(L.mu);
+    if (!L.lib || !L.unsaved) return;
+    out.resize(L.lib->GetSerializedSize());
+    if (out.empty() || FAILED(L.lib->Serialize(out.data(), out.size()))) return;
+    L.unsaved = 0;
+    L.last_save = std::chrono::steady_clock::now();
+  }
+  // Escrita atómica: ficheiro temporário e depois renomear (um fecho a meio não deixa uma cache cortada).
+  std::error_code ec;
+  const std::filesystem::path f = pso_library_file(), tmp = f.string() + ".tmp";
+  std::filesystem::create_directories(f.parent_path(), ec);
+  {
+    std::ofstream o(tmp, std::ios::binary);
+    o.write(out.data(), (std::streamsize)out.size());
+    if (!o) return;
+  }
+  std::filesystem::rename(tmp, f, ec);
+  std::fprintf(stderr, "[d3d12] cache de PSOs gravada: %zu KB (%u lidos, %u criados nesta sessão)\n", out.size() / 1024,
+               L.loaded, L.created);
+}
+
+// Soma de verificação do DXBC (bytes 4..19 do contentor): identifica o bytecode sem o percorrer.
+uint64_t dxbc_id(ID3DBlob* b) {
+  if (!b || b->GetBufferSize() < 20) return 0;
+  uint64_t v[2];
+  std::memcpy(v, static_cast<const uint8_t*>(b->GetBufferPointer()) + 4, 16);
+  return v[0] ^ (v[1] * 0x9E3779B97F4A7C15ull);
+}
+
+ID3D12PipelineState* create_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, uint64_t key, ID3DBlob* vs, ID3DBlob* ps) {
+  PsoLibrary& L = g_pso_lib;
+  wchar_t name[64];
+  swprintf(name, 64, L"%016llX-%016llX-%016llX", (unsigned long long)key, (unsigned long long)dxbc_id(vs),
+           (unsigned long long)dxbc_id(ps));
+  ID3D12PipelineState* pso = nullptr;
+  if (L.lib) {
+    std::lock_guard<std::mutex> lock(L.mu);
+    if (SUCCEEDED(L.lib->LoadGraphicsPipeline(name, &d, IID_PPV_ARGS(&pso)))) {
+      L.loaded++;
+      return pso;
+    }
+    pso = nullptr;
+  }
+  HRESULT hr = g.device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
+  if (FAILED(hr)) return nullptr;
+  L.created++;
+  if (L.lib) {
+    std::lock_guard<std::mutex> lock(L.mu);
+    if (SUCCEEDED(L.lib->StorePipeline(name, pso))) L.unsaved++;
+  }
+  return pso;
+}
+
+// Chave do PSO: shaders (pelo cache_key do HLSL, estável entre sessões) + estado.
+uint64_t pso_key(uint64_t vs_key, uint64_t ps_key, const DrawState& s) {
+  uint32_t words[20] = {(uint32_t)vs_key, (uint32_t)(vs_key >> 32), (uint32_t)ps_key, (uint32_t)(ps_key >> 32), (uint32_t)s.rt[0],
+                        (uint32_t)s.rt[1], (uint32_t)s.rt[2], (uint32_t)s.rt[3], s.num_rt, (uint32_t)s.dsv, s.blend[0], s.blend[1],
+                        s.blend[2], s.blend[3], s.color_mask, s.depth_control, s.stencil, (uint32_t)s.topology,
+                        s.cull | s.depth_clip << 8, (uint32_t)s.depth_bias ^ (s.slope_bits * 31u)};
+  return hash_words(words, 20);
+}
+
+D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc(ID3DBlob* vs, ID3DBlob* ps, const DrawState& s);
+
+// ---- Pré-criação de PSOs em fundo (lista gravada, como a pipeline cache do UnleashedRecomp) ----
+// Cada PSO criado fica registado (chaves dos dois shaders + DrawState) em user_data/shader_cache/pso_list.bin. No arranque seguinte,
+// threads de fundo recriam todos os da lista (da cache do driver, rápido, ou compilando) antes de o jogo os pedir, por isso os picos
+// ao entrar numa zona só acontecem na 1.ª visita. Uma lista que venha no pacote (prebuilt_psos.bin, junto do exe) junta-se à do
+// utilizador. Mudar o formato do DrawState muda kPsoListVersion (listas antigas são ignoradas).
+constexpr uint32_t kPsoListVersion = 1;
+struct PsoRecord {
+  uint64_t key, vs_key, ps_key;
+  DrawState st;
+};
+// Criação de PSOs em threads de fundo, para os pedidos dos desenhos e para a lista gravada (pré-criação no arranque).
+// Com a cache do driver fria cada PSO custa 80–500 ms ao driver da AMD: em série na thread da GPU, entrar numa zona nova
+// parava a imagem 1–2 s. Aqui vários compilam em paralelo; em jogo um desenho espera no máximo GOW_PSO_WAIT_MS por frame
+// (30 ms por omissão) e depois é saltado até o PSO ficar pronto (como o modo assíncrono do Xenia); nos ecrãs de carregamento e
+// menus (< 400 desenhos no frame anterior) espera sempre, para não entrar no nível com PSOs em falta.
+struct PsoJob {
+  uint64_t key, vs_key, ps_key;
+  DrawState st;
+  ID3DBlob *vs, *ps;  // emprestados (Compiled, vivem para sempre) ou nulos: lidos da cache de shaders pela chave
+};
+struct PsoPool {
+  std::mutex mu;
+  std::condition_variable cv;
+  std::deque<PsoJob> jobs;
+  std::unordered_map<uint64_t, ID3D12PipelineState*> done;  // prontos (nulo = falhou), por recolher pela thread da GPU
+  std::unordered_set<uint64_t> pending, known;             // known = já na lista em disco ou por gravar
+  std::vector<PsoRecord> fresh;                            // novos nesta sessão, por gravar
+  std::atomic<uint32_t> created{0}, failed{0}, total{0}, skipped{0};
+};
+PsoPool g_pso_pool;
+double g_pso_wait_ms = 0;   // espera por PSOs neste frame
+
+std::filesystem::path pso_list_file() { return vfs::user_root() / "shader_cache" / "pso_list.bin"; }
+
+void read_pso_list(const std::filesystem::path& f, std::vector<PsoRecord>& out) {
+  std::ifstream in(f, std::ios::binary);
+  uint32_t hdr[3] = {};
+  if (!in.read(reinterpret_cast<char*>(hdr), sizeof hdr) || hdr[0] != 0x4C4F5350u || hdr[1] != kPsoListVersion ||
+      hdr[2] != sizeof(PsoRecord))
+    return;
+  PsoRecord r;
+  while (in.read(reinterpret_cast<char*>(&r), sizeof r)) out.push_back(r);
+}
+
+void save_pso_list() {
+  PsoPool& P = g_pso_pool;
+  std::vector<PsoRecord> add;
+  {
+    std::lock_guard<std::mutex> lock(P.mu);
+    add.swap(P.fresh);
+  }
+  if (add.empty()) return;
+  std::error_code ec;
+  const std::filesystem::path f = pso_list_file();
+  std::filesystem::create_directories(f.parent_path(), ec);
+  const bool fresh_file = !std::filesystem::exists(f, ec) || std::filesystem::file_size(f, ec) < 12;
+  std::ofstream o(f, std::ios::binary | (fresh_file ? std::ios::trunc : std::ios::app));
+  if (fresh_file) {
+    const uint32_t hdr[3] = {0x4C4F5350u, kPsoListVersion, (uint32_t)sizeof(PsoRecord)};
+    o.write(reinterpret_cast<const char*>(hdr), sizeof hdr);
+  }
+  o.write(reinterpret_cast<const char*>(add.data()), (std::streamsize)(add.size() * sizeof(PsoRecord)));
+}
+
+ID3D12PipelineState* create_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, uint64_t key, ID3DBlob* vs, ID3DBlob* ps);
+
+ID3DBlob* blob_from_cache(uint64_t key) {
+  std::vector<char> bytes;
+  ID3DBlob* b = nullptr;
+  if (!key || !shader_prep::load_cached(key, &bytes) || !g.create_blob || FAILED(g.create_blob(bytes.size(), &b))) return nullptr;
+  std::memcpy(b->GetBufferPointer(), bytes.data(), bytes.size());
+  return b;
+}
+
+void pso_worker() {
+  PsoPool& P = g_pso_pool;
+  for (;;) {
+    PsoJob j;
+    {
+      std::unique_lock<std::mutex> lock(P.mu);
+      P.cv.wait(lock, [&] { return !P.jobs.empty(); });
+      j = P.jobs.front();
+      P.jobs.pop_front();
+    }
+    ID3DBlob* vs = j.vs ? j.vs : blob_from_cache(j.vs_key);
+    ID3DBlob* ps = j.ps ? j.ps : j.ps_key ? blob_from_cache(j.ps_key) : nullptr;
+    ID3D12PipelineState* pso = nullptr;
+    if (vs && (!j.ps_key || ps)) pso = create_pso(pso_desc(vs, ps, j.st), j.key, vs, ps);
+    if (vs && !j.vs) vs->Release();
+    if (ps && !j.ps) ps->Release();
+    (pso ? P.created : P.failed)++;
+    std::lock_guard<std::mutex> lock(P.mu);
+    P.pending.erase(j.key);
+    P.done[j.key] = pso;
+  }
+}
+
+void start_pso_pool() {
+  PsoPool& P = g_pso_pool;
+  const unsigned n = std::clamp(std::thread::hardware_concurrency() / 3, 2u, 4u);
+  for (unsigned i = 0; i < n; i++) std::thread(pso_worker).detach();
+  if (std::getenv("GOW_NO_PSO_PREWARM")) return;
+  std::vector<PsoRecord> list;
+  wchar_t exe[MAX_PATH * 4];
+  const DWORD n_exe = GetModuleFileNameW(nullptr, exe, (DWORD)(sizeof exe / sizeof exe[0]));
+  read_pso_list(std::filesystem::path(std::wstring(exe, n_exe)).parent_path() / "prebuilt_psos.bin", list);
+  const size_t shipped = list.size();
+  read_pso_list(pso_list_file(), list);
+  std::lock_guard<std::mutex> lock(P.mu);
+  for (const PsoRecord& r : list)
+    if (P.known.insert(r.key).second) {
+      P.jobs.push_back({r.key, r.vs_key, r.ps_key, r.st, nullptr, nullptr});
+      P.pending.insert(r.key);
+    }
+  P.total = (uint32_t)P.jobs.size();
+  P.cv.notify_all();
+  if (P.total)
+    std::fprintf(stderr, "[d3d12] PSOs: %u na lista (%zu do pacote), pré-criação em %u threads\n", P.total.load(), shipped, n);
+}
+
 ID3D12PipelineState* pipeline(Compiled* vs, Compiled* ps, const DrawState& s) {
   Prof pf(kProfPso);
-  uint32_t words[20] = {(uint32_t)vs->info.hash, (uint32_t)(vs->info.hash >> 32), ps ? (uint32_t)ps->info.hash : 0,
-                        ps ? (uint32_t)(ps->info.hash >> 32) : 0, (uint32_t)s.rt[0], (uint32_t)s.rt[1],
-                        (uint32_t)s.rt[2], (uint32_t)s.rt[3], s.num_rt, (uint32_t)s.dsv, s.blend[0], s.blend[1],
-                        s.blend[2], s.blend[3], s.color_mask, s.depth_control, s.stencil, (uint32_t)s.topology, s.cull, (uint32_t)s.depth_bias ^ (s.slope_bits * 31u)};
-  uint64_t key = hash_words(words, 20);
+  const uint64_t key = pso_key(vs->cache_key ? vs->cache_key : vs->info.hash, ps ? (ps->cache_key ? ps->cache_key : ps->info.hash) : 0, s);
   auto it = g.psos.find(key);
   if (it != g.psos.end()) return it->second;
+  PsoPool& P = g_pso_pool;
+  auto take = [&](ID3D12PipelineState** out) {  // com P.mu
+    auto d = P.done.find(key);
+    if (d == P.done.end()) return false;
+    *out = d->second;
+    P.done.erase(d);
+    return true;
+  };
+  ID3D12PipelineState* pso = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(P.mu);
+    if (take(&pso)) return g.psos[key] = pso;
+    if (!P.pending.count(key)) {
+      // À frente da pré-criação: este desenho está à espera.
+      P.jobs.push_front({key, vs->cache_key, ps ? ps->cache_key : 0, s, vs->blob, ps ? ps->blob : nullptr});
+      P.pending.insert(key);
+      if (vs->cache_key && P.known.insert(key).second) P.fresh.push_back({key, vs->cache_key, ps ? ps->cache_key : 0, s});
+      P.cv.notify_one();
+    }
+  }
+  static const double budget = std::getenv("GOW_PSO_WAIT_MS") ? std::atof(std::getenv("GOW_PSO_WAIT_MS")) : 30.0;
+  const bool wait_all = g_last_draws < 400;
+  Phase ph("à espera de PSO");
+  LARGE_INTEGER t0, t1;
+  QueryPerformanceCounter(&t0);
+  bool got = false;
+  for (;;) {
+    {
+      std::lock_guard<std::mutex> lock(P.mu);
+      got = take(&pso);
+    }
+    QueryPerformanceCounter(&t1);
+    if (got || (!wait_all && g_pso_wait_ms + prof_ms(t1.QuadPart - t0.QuadPart) >= budget)) break;
+    std::this_thread::sleep_for(std::chrono::microseconds(250));
+  }
+  const double waited = prof_ms(t1.QuadPart - t0.QuadPart);
+  g_pso_wait_ms += waited;
+  g_hitch[kHitchPso].ms += waited;
+  g_hitch[kHitchPso].n++;
+  if (!got) {
+    P.skipped++;
+    return nullptr;  // ainda a compilar: o desenho é saltado neste frame
+  }
+  if (!pso)
+    std::fprintf(stderr, "[d3d12] CreateGraphicsPipelineState falhou (vs %016llX ps %016llX)\n",
+                 (unsigned long long)vs->info.hash, ps ? (unsigned long long)ps->info.hash : 0ull);
+  return g.psos[key] = pso;
+}
+
+D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc(ID3DBlob* vs, ID3DBlob* ps, const DrawState& s) {
   D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
   d.pRootSignature = g.root;
-  d.VS = {vs->blob->GetBufferPointer(), vs->blob->GetBufferSize()};
-  if (ps) d.PS = {ps->blob->GetBufferPointer(), ps->blob->GetBufferSize()};
+  d.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+  if (ps) d.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
   d.BlendState.IndependentBlendEnable = TRUE;
   for (uint32_t i = 0; i < s.num_rt; i++) {
     auto& b = d.BlendState.RenderTarget[i];
@@ -1245,7 +1555,7 @@ ID3D12PipelineState* pipeline(Compiled* vs, Compiled* ps, const DrawState& s) {
                                : (s.cull & 1) ? D3D12_CULL_MODE_FRONT
                                               : D3D12_CULL_MODE_NONE;
   d.RasterizerState.FrontCounterClockwise = (s.cull & 4) ? FALSE : TRUE;
-  d.RasterizerState.DepthClipEnable = TRUE;
+  d.RasterizerState.DepthClipEnable = s.depth_clip ? TRUE : FALSE;
   uint32_t dc = s.depth_control;
   if (s.dsv != DXGI_FORMAT_UNKNOWN) {
     d.DepthStencilState.DepthEnable = (dc >> 1) & 1;
@@ -1288,15 +1598,7 @@ ID3D12PipelineState* pipeline(Compiled* vs, Compiled* ps, const DrawState& s) {
   d.NumRenderTargets = s.num_rt;
   for (uint32_t i = 0; i < s.num_rt; i++) d.RTVFormats[i] = s.rt[i];
   d.SampleDesc.Count = 1;
-  ID3D12PipelineState* pso = nullptr;
-  Phase ph("criação de PSO");
-  HRESULT hr = g.device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
-  if (FAILED(hr)) {
-    std::fprintf(stderr, "[d3d12] CreateGraphicsPipelineState falhou 0x%08lX (vs %016llX ps %016llX)\n", hr,
-                 (unsigned long long)vs->info.hash, ps ? (unsigned long long)ps->info.hash : 0ull);
-    pso = nullptr;
-  }
-  return g.psos[key] = pso;
+  return d;
 }
 
 // ---- Índices ----
@@ -1706,6 +2008,7 @@ bool init_device() {
     return false;
   g.upload->Map(0, nullptr, reinterpret_cast<void**>(&g.upload_ptr));
   if (!create_roots()) return false;
+  open_pso_library();
   bind_heaps();
   // Textura 1×1 branca para slots sem textura.
   DecodedTexture white;
@@ -1738,6 +2041,7 @@ bool init() {
   if (const char* e = std::getenv("GOW_RESOLVE_TO_MEMORY"); e && *e == '1') g.resolve_to_memory = true;
   if (const char* e = std::getenv("GOW_TRACE_RENDER"); e && *e) g.trace = true, g.trace_frame = std::strtoull(e, nullptr, 10);
   g.active = init_device();
+  if (g.active) start_pso_pool();
   // Cache por preparar (sem launcher): a mesma preparação a partir dos pacotes do disco, em fundo. GOW_SCAN_MEMORY=1 junta o
   // varrimento do microcódigo na memória depois de cada carregamento.
   if (g.active && !std::getenv("GOW_NO_PREBUILD") && !shader_prep::up_to_date()) shader_prep::start();
@@ -1748,6 +2052,11 @@ bool init() {
 
 bool active() { return g.active; }
 const char* phase() { return g_phase.load(); }
+void save_caches() {
+  if (!g.active) return;
+  save_pso_library();
+  save_pso_list();
+}
 
 void load_shader(bool pixel, std::vector<uint32_t> ucode) {
   if (!g.active) return;
@@ -1932,6 +2241,17 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   // Rect lists (0x08) são primitivas de ecrã: sem culling. Com ele, o restauro de profundidade dos passes finais
   // (retângulo de ecrã inteiro, PS com oDepth) era descartado e o teste de profundidade falhava no mundo.
   st.cull = (no_cull || prim == 8 || st.topology != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE) ? 0 : mode_cntl_cull;
+  // Recorte em z como no Xenos (o VS escreve agora a posição de recorte linear, sem saturate): só sem CLIP_DISABLE, e nunca nas
+  // rect lists (clears, restauros de profundidade, pós-processamento: o D3D12 limita-as à gama do viewport).
+  const uint32_t clip_cntl = reg(kPaClClipCntl);
+  st.depth_clip = prim != 8 && !((clip_cntl >> 16) & 1);
+  {
+    static std::set<uint64_t> seen;
+    const uint64_t k = (uint64_t)clip_cntl << 32 ^ (uint64_t)reg(kPaClVteCntl) << 8 ^ (prim == 8 ? 1u : 0u);
+    if (seen.size() < 32 && seen.insert(k).second)
+      std::fprintf(stderr, "[d3d12] estado de recorte novo: PA_CL_CLIP_CNTL %08X VTE %08X prim %u vp z %g + %g\n", clip_cntl,
+                   reg(kPaClVteCntl), prim, regf(kPaClVportXscale + 4), regf(kPaClVportXscale + 5));
+  }
   // GOW_DEBUG_N=a,b: desenhos com esses números de índices sem culling nem teste de profundidade.
   static const std::set<uint32_t> debug_n = [] {
     std::set<uint32_t> o;
@@ -2405,6 +2725,20 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     g.last_present = now;
     g.stat_worst_ms = std::max(g.stat_worst_ms, ms);
     if (ms > 50.0f) g.stat_slow_frames++;
+    if (ms > 40.0f && g.frame > 2) {
+      std::string parts;
+      double inside = 0;
+      for (int i = 0; i < kHitchCount; i++) {
+        if (!g_hitch[i].n) continue;
+        char b[64];
+        std::snprintf(b, sizeof b, ", %s %.0f ms (%u)", kHitchNames[i], g_hitch[i].ms, g_hitch[i].n);
+        parts += b;
+        inside += g_hitch[i].ms;
+      }
+      std::fprintf(stderr, "[lento] frame %llu: %.0f ms, %u desenhos, espera FXC %d ms%s; resto %.0f ms\n", (unsigned long long)g.frame, ms,
+                   g.draws, g.shader_wait_ms, parts.c_str(), ms - inside - g.shader_wait_ms);
+    }
+    for (int i = 0; i < kHitchCount; i++) g_hitch_total[i].ms += g_hitch[i].ms, g_hitch_total[i].n += g_hitch[i].n, g_hitch[i] = {};
   }
   if (g.frame % 30 == 0 && g_prebuild_left.load()) {
     char t[128];
@@ -2419,6 +2753,18 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames; pior frame %.0f ms, %u acima de 50 ms; shaders: %llu pedidos por desenhos, %u por pré-compilar\n",
                  (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
                  g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates, g.stat_worst_ms, g.stat_slow_frames, (unsigned long long)g_demand_compiles.load(), g_prebuild_left.load());
+    {
+      std::string parts;
+      for (int i = 0; i < kHitchCount; i++) {
+        char b[64];
+        std::snprintf(b, sizeof b, "%s %.0f ms (%u)%s", kHitchNames[i], g_hitch_total[i].ms, g_hitch_total[i].n, i + 1 < kHitchCount ? ", " : "");
+        parts += b;
+        g_hitch_total[i] = {};
+      }
+      std::fprintf(stderr, "[d3d12] custos raros em 120 frames: %s; PSOs: %u da cache do driver, %u compilados, %u da lista de %u, %u desenhos à espera de PSO\n",
+                   parts.c_str(), g_pso_lib.loaded, g_pso_lib.created, g_pso_pool.created.load(), g_pso_pool.total.load(),
+                   g_pso_pool.skipped.exchange(0));
+    }
     g.stat_worst_ms = 0;
     g.stat_slow_frames = 0;
     g.stat_submits = g.stat_creates = 0;
@@ -2442,6 +2788,13 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     if (g_prof_last_swap.QuadPart) g_prof_frame_ms += prof_ms(now.QuadPart - g_prof_last_swap.QuadPart);
     g_prof_last_swap = now;
   }
+  // PSOs novos gravados em ecrãs de carregamento/menus (poucos desenhos), onde a escrita não se nota; também ao sair.
+  if (g_pso_lib.unsaved && g.draws < 400 && std::chrono::steady_clock::now() - g_pso_lib.last_save > std::chrono::seconds(10)) {
+    save_pso_library();
+    save_pso_list();
+  }
+  g_last_draws = g.draws;
+  g_pso_wait_ms = 0;
   g.draws = g.skipped = g.resolves = 0;
   g.shader_wait_ms = 0;
   g.frame++;

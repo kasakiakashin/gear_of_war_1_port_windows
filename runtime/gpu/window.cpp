@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "config.h"
+#include "gpu/renderer.h"
 
 namespace window {
 namespace {
@@ -106,6 +107,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
       g_closed = true;
       std::fprintf(stderr, "[window] janela fechada: a terminar\n");
+      gpu::render::save_caches();
       std::fflush(stderr);
       std::_Exit(0);
     case WM_SIZE:

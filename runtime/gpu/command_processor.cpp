@@ -246,9 +246,53 @@ void vblank_thread() {
   const char* e = std::getenv("GOW_VBLANK_HZ");
   const double forced = e ? std::atof(e) : 0.0;
   auto next = std::chrono::steady_clock::now();
+  // AdaptiveFps: com um limite acima de 30 que a cena não aguenta (o corredor com 6000 desenhos faz 40–50), os frames alternam
+  // entre 2, 3 e 4 VBlanks (17/25/33 ms) e a imagem dá solavancos. Nesse caso o VBlank cai para metade (30 FPS certos) e, de
+  // tempos a tempos, experimenta-se o limite inteiro durante 2 s: se o ritmo chegar, fica; se não, a próxima tentativa demora o
+  // dobro (8 s até 64 s).
+  bool half = false, probing = false;
+  int low_windows = 0, probe_windows = 0;
+  double probe_delay = 8.0, half_since = 0.0;
+  auto window_start = next;
+  uint32_t window_swaps = g_swap_count.load();
   for (;;) {
-    const int limit = config::get().fps_limit;
-    const double hz = forced > 0 ? forced : limit > 0 ? limit * 2.0 : 480.0;  // 0 = ilimitado
+    const config::Config& cfg = config::get();
+    const int limit = cfg.fps_limit;
+    const bool adaptive = cfg.adaptive_fps && forced <= 0 && limit >= 60;
+    if (!adaptive) half = probing = false, low_windows = 0;
+    const double hz = forced > 0 ? forced : limit > 0 ? (half ? limit : limit * 2.0) : 480.0;  // 0 = ilimitado
+    if (const auto now = std::chrono::steady_clock::now(); adaptive && now - window_start >= std::chrono::seconds(1)) {
+      const double secs = std::chrono::duration<double>(now - window_start).count();
+      const uint32_t sc = g_swap_count.load();
+      const double fps = (sc - window_swaps) / secs, want = hz / 2.0;
+      window_start = now;
+      window_swaps = sc;
+      if (!half) {
+        if (probing) {
+          // 1.ª janela da tentativa: ainda a sair do ritmo anterior; decide-se na 2.ª.
+          if (++probe_windows >= 2) {
+            probing = false;
+            if (fps >= 0.92 * want) {
+              probe_delay = 8.0;
+              std::fprintf(stderr, "[gpu] FPS adaptativo: %d FPS aguentam-se (%.1f)\n", limit, fps);
+            } else {
+              half = true, half_since = 0.0, probe_delay = std::min(probe_delay * 2.0, 64.0);
+              std::fprintf(stderr, "[gpu] FPS adaptativo: %.1f de %d, volta a %d (próxima tentativa em %.0f s)\n", fps, limit, limit / 2, probe_delay);
+            }
+          }
+        } else if (fps < 0.85 * want && fps > 1.0) {
+          if (++low_windows >= 2) {
+            half = true, half_since = 0.0, low_windows = 0;
+            std::fprintf(stderr, "[gpu] FPS adaptativo: %.1f de %d, passa a %d\n", fps, limit, limit / 2);
+          }
+        } else {
+          low_windows = 0;
+        }
+      } else if ((half_since += secs) >= probe_delay) {
+        half = false, probing = true, probe_windows = 0;
+      }
+    }
+    if (const double hz2 = forced > 0 ? forced : limit > 0 ? (half ? limit : limit * 2.0) : 480.0; hz2 != hz) continue;
     const auto period = std::chrono::microseconds((int64_t)(1e6 / hz));
     next += period;
     // Dorme até ~1 ms antes e acaba com yields: o VBlank tem de cair a 16,67 ms certos (um VBlank perdido atrasa o

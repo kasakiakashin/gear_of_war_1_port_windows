@@ -20,7 +20,10 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 
 - **Recompilação estática:** 2,4 milhões de instruções PowerPC (VMX/VMX128 incluído) traduzidas para C++.
 - **Direct3D 12:** resolução interna até 4K e FSR 1.0 (EASU + RCAS).
-- **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real.
+- **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real. Com "FPS adaptativo"
+  (`AdaptiveFps=1`, por omissão), uma cena que não aguenta 60 fica a 30 estáveis em vez de oscilar.
+- **Cache de PSOs:** os pipelines compilados pelo driver ficam em `user_data/shader_cache/pipelines.bin` e a lista dos usados em
+  `pso_list.bin`; no arranque seguinte são recriados em fundo, por isso os picos ao entrar numa zona só acontecem na 1.ª visita.
 - **Tradutor de shaders Xenos:** microcódigo da GPU do Xbox 360 convertido em HLSL, com cache em disco.
 - **Launcher com pré-compilação:** antes do jogo, procura os 17 mil shaders nos pacotes do disco (com descompressão LZO) e
   compila-os com todos os núcleos, com barra de progresso; o pacote traz-os já compilados (`prebuilt_shaders.bin`).
@@ -171,7 +174,10 @@ It is not an emulator and does not use the original source code.
 
 - **Static recompilation:** 2.4 million PowerPC instructions (including VMX/VMX128) translated to C++.
 - **Direct3D 12:** internal resolution up to 4K and FSR 1.0 (EASU + RCAS).
-- **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time.
+- **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time. With "adaptive FPS"
+  (`AdaptiveFps=1`, the default), a scene that cannot hold 60 stays at a steady 30 instead of oscillating.
+- **PSO cache:** pipelines compiled by the driver are kept in `user_data/shader_cache/pipelines.bin` and the list of used ones in
+  `pso_list.bin`; on the next start they are recreated in the background, so hitches when entering an area only happen once.
 - **Xenos shader translator:** Xbox 360 GPU microcode converted to HLSL, with a disk cache.
 - **Launcher with shader precompilation:** before the game starts, it finds the 17,000 shaders in the disc packages
   (LZO-decompressing them) and compiles them on every core, with a progress bar; the package ships them precompiled

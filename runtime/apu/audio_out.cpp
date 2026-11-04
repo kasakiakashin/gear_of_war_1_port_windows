@@ -82,6 +82,14 @@ size_t pop(float* out, size_t frames) {
 }
 
 DWORD WINAPI wasapi_thread(LPVOID) {
+  // MMCSS "Pro Audio": o agendador do Windows dá a esta thread fatias garantidas mesmo com todos os núcleos ocupados.
+  if (HMODULE avrt = LoadLibraryA("avrt.dll")) {
+    using SetMm = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+    if (auto set_mm = (SetMm)GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW")) {
+      DWORD task = 0;
+      set_mm(L"Pro Audio", &task);
+    }
+  }
   HMODULE ole = LoadLibraryA("ole32.dll");
   auto co_init = ole ? (HRESULT(WINAPI*)(LPVOID, DWORD))GetProcAddress(ole, "CoInitializeEx") : nullptr;
   auto co_create = ole ? (HRESULT(WINAPI*)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID*))GetProcAddress(ole, "CoCreateInstance")

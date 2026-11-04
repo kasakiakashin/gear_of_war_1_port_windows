@@ -273,8 +273,13 @@ void xma_init() {
   std::memset(phys_ptr(g_array_phys), 0, kCtxSize * kCtxCount);
   *reg(kRegArray) = (LONG)g_array_phys;  // little-endian, lido com lwbrx
   std::fprintf(stderr, "[xma] tabela de contextos: virtual 0x%08X físico 0x%08X\n", g_array_va, g_array_phys);
+  // Acima das threads do jogo e do FXC: uma passagem atrasada deixa a voz sem amostras (um corte audível). Só código do host,
+  // sem esperas por locks do convidado, por isso não há inversão de prioridade.
   HANDLE h = CreateThread(nullptr, 1u << 20, xma_thread, nullptr, 0, nullptr);
-  if (h) CloseHandle(h);
+  if (h) {
+    SetThreadPriority(h, THREAD_PRIORITY_HIGHEST);
+    CloseHandle(h);
+  }
 }
 
 }  // namespace apu

@@ -39,6 +39,8 @@ const char kDefaults[] =
     "VSync=0\n"
     "; Limite de FPS: 30 (como no Xbox 360), 60, 120 ou 0 = ilimitado. O tempo do jogo continua real.\n"
     "FpsLimit=60\n"
+    "; 1 = se a cena nao aguentar o limite (60 ou 120), desce para metade em vez de oscilar (menos solavancos).\n"
+    "AdaptiveFps=1\n"
     "[Input]\n"
     "; Sensibilidade do rato (mira).\n"
     "MouseSensitivity=1.0\n"
@@ -115,6 +117,7 @@ Config load() {
     else if (key == "Volume") c.volume = std::clamp(f, 0.0f, 1.0f);
     else if (key == "VSync") c.vsync = f != 0.0f;
     else if (key == "FpsLimit") c.fps_limit = std::clamp((int)f, 0, 1000);
+    else if (key == "AdaptiveFps") c.adaptive_fps = f != 0.0f;
     else if (key == "InvertY") c.invert_y = f != 0.0f;
     else if (key == "ResolutionScale") c.resolution_scale = std::clamp(f, 0.5f, 4.0f);
     else if (key == "Fullscreen") c.fullscreen = f != 0.0f;
@@ -157,6 +160,7 @@ void save() {
                                                         {"Volume", num(c.volume)},
                                                         {"VSync", c.vsync ? "1" : "0"},
                                                         {"FpsLimit", std::to_string(c.fps_limit)},
+                                                        {"AdaptiveFps", c.adaptive_fps ? "1" : "0"},
                                                         {"InvertY", c.invert_y ? "1" : "0"},
                                                         {"ResolutionScale", num(c.resolution_scale)},
                                                         {"Fullscreen", c.fullscreen ? "1" : "0"},

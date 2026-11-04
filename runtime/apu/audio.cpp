@@ -6,7 +6,7 @@
 // avançarem e terminarem: sem ele, sons (e o que espera por eles — cenas da UI, falas) ficam parados.
 // Aqui uma thread convidada dedicada chama a callback; os quadros entregues vão para a saída WASAPI (audio_out.cpp).
 // Com a saída ativa o ritmo é o da placa de som: chama-se a callback sempre que a fila tem menos do que a latência
-// pedida (~27 ms), mas nunca em rajada: o WASAPI retira ~10 ms de uma vez, e duas misturas seguidas não dariam tempo
+// pedida (~43 ms), mas nunca em rajada: o WASAPI retira ~10 ms de uma vez, e duas misturas seguidas não dariam tempo
 // ao XMA para entregar mais amostras (a voz ficava sem dados, um estalo no início do quadro). Sem saída (GOW_AUDIO=0 ou
 // sem dispositivo) usa-se um temporizador de 5,33 ms.
 //
@@ -54,7 +54,7 @@ DWORD WINAPI audio_thread(LPVOID) {
   uint64_t ticks = 0;
   static const size_t target_queued = [] {
     const char* e = std::getenv("GOW_AUDIO_QUEUE");  // em quadros de 256 amostras
-    return (size_t)256 * (e ? (size_t)std::atoi(e) : 5);
+    return (size_t)256 * (e ? (size_t)std::atoi(e) : 8);  // 43 ms: folga para frames lentos e para o XMA
   }();
   const auto min_gap = std::chrono::microseconds(3500);
   auto last_call = std::chrono::steady_clock::now();
@@ -107,8 +107,13 @@ XBOX_IMPORT(XAudioRegisterRenderDriverClient) {
     std::fprintf(stderr, "[audio] cliente %d: callback 0x%08X(0x%08X), quadro de %.2f ms\n", i, cb, cb_arg,
                  kFrameSeconds * 1000);
     std::call_once(g_thread_once, [] {
+      // Prioridade alta: a mistura do XAudio não pode esperar pelas threads do jogo nem pelo FXC (a fila tem ~40 ms). As critical
+      // sections do convidado bloqueiam num evento (não giram), por isso subir a prioridade não prende o dono do lock.
       HANDLE h = CreateThread(nullptr, 16u << 20, audio_thread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
-      if (h) CloseHandle(h);
+      if (h) {
+        SetThreadPriority(h, THREAD_PRIORITY_HIGHEST);
+        CloseHandle(h);
+      }
     });
     return ret_status(ctx, kStatusSuccess);
   }

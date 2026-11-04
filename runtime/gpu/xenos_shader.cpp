@@ -825,16 +825,14 @@ VSOut main(uint vid : SV_VertexID) {
   float3 q = p.xyz;
   if (vte & 0x100u) q.xy *= w;
   if (vte & 0x200u) q.z *= w;
-  float iw = w != 0.0 ? 1.0 / w : 1.0;
-  float3 n = q * iw;
-  float2 scr = float2((vte & 1u) ? n.x * xe_vp_scale.x : n.x, (vte & 4u) ? n.y * xe_vp_scale.y : n.y);
-  if (vte & 2u) scr.x += xe_vp_offset.x;
-  if (vte & 8u) scr.y += xe_vp_offset.y;
-  scr += xe_rt.zw;
-  float z = (vte & 0x10u) ? n.z * xe_vp_scale.z : n.z;
-  if (vte & 0x20u) z += xe_vp_offset.z;
-  float2 ndc = float2(scr.x * xe_rt.x - 1.0, 1.0 - scr.y * xe_rt.y);
-  o.pos = float4(ndc * w, saturate(z) * w, w);
+  // Viewport aplicado em espaço de recorte (sem dividir por w): a posição fica linear em (q, w), e o recorte do D3D12 corta os
+  // triângulos que atravessam o plano próximo no mesmo sítio que o Xenos. Dividir e voltar a multiplicar com saturate(z)
+  // deformava-os (câmara encostada a paredes, volumes de sombra atrás da câmara) e perdia os vértices com w = 0.
+  float2 sxy = float2((vte & 1u) ? xe_vp_scale.x : 1.0, (vte & 4u) ? xe_vp_scale.y : 1.0);
+  float2 oxy = float2((vte & 2u) ? xe_vp_offset.x : 0.0, (vte & 8u) ? xe_vp_offset.y : 0.0) + xe_rt.zw;
+  float2 sp = q.xy * sxy + oxy * w;
+  float z = q.z * ((vte & 0x10u) ? xe_vp_scale.z : 1.0) + ((vte & 0x20u) ? xe_vp_offset.z : 0.0) * w;
+  o.pos = float4(sp.x * xe_rt.x - w, w - sp.y * xe_rt.y, z, w);
   [unroll] for (uint i = 0; i < 16; i++) o.o[i] = raw.o[i];
   return o;
 }

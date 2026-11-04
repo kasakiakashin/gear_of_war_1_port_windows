@@ -24,6 +24,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
 void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t fetch[6]);
 // Fase atual (diagnóstico do watchdog).
 const char* phase();
+// Grava a cache de PSOs do driver (user_data/shader_cache/pipelines.bin) se tiver entradas novas. Chamado antes de sair.
+void save_caches();
 
 }  // namespace render
 }  // namespace gpu
