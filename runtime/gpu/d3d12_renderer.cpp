@@ -75,7 +75,17 @@ enum : uint32_t {
   kConstAlu = 0x4000, kConstFetch = 0x4800, kConstBool = 0x4900, kConstLoop = 0x4908,
 };
 
-uint32_t reg(uint32_t i) { return register_value(i); }
+// Como register_value (command_processor.cpp), sem as duas chamadas entre ficheiros: ~60 leituras por desenho. Registos
+// 0..0x3FFF no bloco MMIO da GPU (big-endian, como o CPU os vê), 0x4000+ no vetor do processador de comandos.
+uint32_t reg(uint32_t i) {
+  static const uint8_t* const mmio = gm::base() + gm::kGpuRegBase;
+  static const uint32_t* const high = constant_registers();
+  i &= 0xFFFF;
+  if (i >= 0x4000) return high[i - 0x4000];
+  uint32_t v;
+  std::memcpy(&v, mmio + 4 * i, 4);
+  return __builtin_bswap32(v);
+}
 float regf(uint32_t i) {
   uint32_t v = reg(i);
   float f;
@@ -120,6 +130,66 @@ struct Compiled {
   std::atomic<bool> pending{false};  // FXC a correr numa thread de fundo (o desenho é saltado até acabar)
 };
 
+// Tabela de dispersão com endereçamento aberto para as caches do caminho de desenho (chaves de 64 bits): potência de 2 em vez do
+// módulo por um primo do std::unordered_map (uma divisão por consulta, ~8 consultas por desenho), e clear() em O(1) por geração.
+template <typename V>
+struct FlatMap {
+  struct Slot {
+    uint64_t key;
+    uint32_t gen;
+    V val;
+  };
+  std::vector<Slot> slots;
+  uint64_t mask = 0;
+  uint32_t gen = 1;
+  size_t count = 0;
+  static uint64_t mix(uint64_t k) {
+    k ^= k >> 33;
+    k *= 0xFF51AFD7ED558CCDull;
+    return k ^ (k >> 33);
+  }
+  V* find(uint64_t key) {
+    if (slots.empty()) return nullptr;
+    for (uint64_t i = mix(key) & mask;; i = (i + 1) & mask) {
+      Slot& s = slots[i];
+      if (s.gen != gen) return nullptr;
+      if (s.key == key) return &s.val;
+    }
+  }
+  V& operator[](uint64_t key) {
+    if ((count + 1) * 2 > slots.size()) grow();
+    for (uint64_t i = mix(key) & mask;; i = (i + 1) & mask) {
+      Slot& s = slots[i];
+      if (s.gen != gen) {
+        s.gen = gen, s.key = key, s.val = V{};
+        count++;
+        return s.val;
+      }
+      if (s.key == key) return s.val;
+    }
+  }
+  void clear() {
+    count = 0;
+    if (++gen == 0) {
+      for (Slot& s : slots) s.gen = 0;
+      gen = 1;
+    }
+  }
+  size_t size() const { return count; }
+  void grow() {
+    std::vector<Slot> old;
+    old.swap(slots);
+    slots.resize(std::max<size_t>(64, old.size() * 2));
+    for (Slot& s : slots) s.gen = 0;
+    mask = slots.size() - 1;
+    const uint32_t live = gen;
+    gen = 1;
+    count = 0;
+    for (Slot& s : old)
+      if (s.gen == live) (*this)[s.key] = s.val;
+  }
+};
+
 struct Renderer {
   bool active = false;
   HMODULE d3d12 = nullptr, dxgi = nullptr, compiler = nullptr;
@@ -155,7 +225,7 @@ struct Renderer {
     D3D12_GPU_VIRTUAL_ADDRESS va;
     uint64_t hash;
   };
-  std::unordered_map<uint64_t, VbCopy> vb_cache;
+  FlatMap<VbCopy> vb_cache;
   uint64_t vb_stale = 0;
   struct IndexCopy {
     D3D12_GPU_VIRTUAL_ADDRESS va;
@@ -163,10 +233,43 @@ struct Renderer {
     D3D12_PRIMITIVE_TOPOLOGY topo;
     D3D12_PRIMITIVE_TOPOLOGY_TYPE type;
   };
-  std::unordered_map<uint64_t, IndexCopy> idx_cache;
+  FlatMap<IndexCopy> idx_cache;
   ID3D12RootSignature* bound_root = nullptr;
   ID3D12PipelineState* bound_pso = nullptr;
-  std::unordered_map<uint64_t, uint32_t> srv_tables, smp_tables;  // tabelas de descritores por conteúdo, por submit
+  FlatMap<uint32_t> srv_tables, smp_tables;  // tabelas de descritores por conteúdo, por submit
+  // Textura por constante de fetch (6 dwords + cube), válida até ao próximo resolve ou swap: o texture_for já devolvia a
+  // mesma textura no resto do frame, mas a procura (cópias de resolve, mapa de texturas, hash rápido) custava por desenho.
+  struct TexLookup {
+    uint32_t dw[6];
+    bool cube;
+    Texture* t;
+  };
+  FlatMap<TexLookup> tex_lookup;
+  // Tabelas de descritores e tamanhos de textura de cada PS, enquanto as constantes de fetch dos slots que ele lê não mudarem
+  // (constant_generations), no mesmo submit e sem resolves/swap pelo meio (os mesmos casos que esvaziam tex_lookup).
+  struct DescCache {
+    uint64_t time;
+    uint32_t srv_base, smp_base;
+    Texture* tex[32];
+    float size[32][4];
+  };
+  FlatMap<DescCache> desc_cache;  // por PS (endereço do Compiled)
+  // Estado já gravado no command list (por submit): o que for igual ao do desenho anterior não é repetido. Constantes iguais
+  // às do desenho anterior reaproveitam a cópia já no anel.
+  struct ConstCopy {
+    D3D12_GPU_VIRTUAL_ADDRESS va = 0;
+    uint32_t n = 0;
+    const void* key = nullptr;  // VS/PS: shader (máscara de constantes usadas)
+    uint32_t base = ~0u;
+    uint64_t time = 0;  // constant_clock() quando foi copiada (cópias dos registos de constantes)
+    alignas(16) uint8_t data[256 * 16];
+  };
+  ConstCopy cc_vs, cc_ps, cc_fetch, cc_bools, cc_sys, cc_vf;
+  D3D12_GPU_VIRTUAL_ADDRESS bound_cbv[8] = {}, bound_srv_root[2] = {};
+  uint64_t bound_tables[2] = {~0ull, ~0ull};
+  uint64_t bound_om = 0, bound_misc = 0;
+  D3D12_RECT bound_scissor{-1, -1, -1, -1};
+  D3D12_PRIMITIVE_TOPOLOGY bound_topo = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
   std::chrono::steady_clock::time_point last_present;
   float stat_worst_ms = 0;
   uint32_t stat_slow_frames = 0;  // acima de 50 ms
@@ -179,7 +282,7 @@ struct Renderer {
   ID3DBlob *blit_vs = nullptr, *blit_ps = nullptr;
   std::map<uint32_t, ID3D12PipelineState*> blit_pso;  // por formato DXGI
   std::unordered_map<uint64_t, Compiled> shaders;
-  std::unordered_map<uint64_t, ID3D12PipelineState*> psos;
+  FlatMap<ID3D12PipelineState*> psos;
   std::map<RtKey, Texture> rts;
   // Cópias de resolve por (endereço físico de destino, formato DXGI); a mais recente (serial) é a que vale.
   std::map<std::pair<uint32_t, uint32_t>, Texture> resolved;
@@ -215,8 +318,9 @@ Renderer g;
 std::atomic<const char*> g_phase{"ocioso"};
 struct Phase {
   const char* prev;
-  explicit Phase(const char* p) : prev(g_phase.exchange(p)) {}
-  ~Phase() { g_phase = prev; }
+  // Só a thread da GPU escreve: sem exchange/seq_cst (2 operações com lock por desenho).
+  explicit Phase(const char* p) : prev(g_phase.load(std::memory_order_relaxed)) { g_phase.store(p, std::memory_order_relaxed); }
+  ~Phase() { g_phase.store(prev, std::memory_order_relaxed); }
 };
 
 bool traced_frame() { return g.frame == g.trace_frame; }
@@ -225,10 +329,10 @@ uint32_t scaled(float v) { return (uint32_t)std::lround(v * g.scale); }
 // GOW_PROFILE_GPU=1: tempo do processador de comandos por fase, médio por frame, no relatório de 120 frames.
 enum ProfCat {
   kProfDraw, kProfTexture, kProfShader, kProfPso, kProfVertex, kProfResolve, kProfSubmit, kProfIndex, kProfConst,
-  kProfRecord, kProfDesc, kProfSetup, kProfCount
+  kProfRecord, kProfDesc, kProfSetup, kProfPresent, kProfSwap, kProfCount
 };
 const char* const kProfNames[kProfCount] = {"desenho", "texturas", "shaders", "PSOs",       "vértices",
-                                            "resolves", "submit",   "índices", "constantes", "gravação", "descritores", "estado"};
+                                            "resolves", "submit",   "índices", "constantes", "gravação", "descritores", "estado", "Present", "swap"};
 const bool g_profile = std::getenv("GOW_PROFILE_GPU") != nullptr;
 double g_prof[kProfCount] = {};
 LARGE_INTEGER g_prof_last_swap{};
@@ -400,6 +504,18 @@ void queue_writeback(Texture& t, uint32_t row, uint32_t w, uint32_t h, uint32_t 
   g.writebacks.push_back({rb, fp, w, h, dest, pitch, bpp, endian});
 }
 
+// Esquece o estado gravado no command list (root signature, PSO, argumentos, OM/RS/IA): o próximo desenho volta a defini-lo.
+void invalidate_bound() {
+  g.bound_root = nullptr;
+  g.bound_pso = nullptr;
+  for (auto& v : g.bound_cbv) v = 0;
+  g.bound_srv_root[0] = g.bound_srv_root[1] = 0;
+  g.bound_tables[0] = g.bound_tables[1] = ~0ull;
+  g.bound_om = g.bound_misc = 0;
+  g.bound_scissor = {-1, -1, -1, -1};
+  g.bound_topo = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+}
+
 // Executa o que foi gravado e reabre o command list no outro slot. Só se espera pela GPU até ao fim do submit
 // anterior desse slot (o CPU grava o frame seguinte enquanto a GPU desenha este); wait_all espera por tudo
 // (leituras de volta: capturas, resolves para a memória convidada).
@@ -431,10 +547,12 @@ void submit(bool wait_all = false) {
   g.upload_offset = 0;
   g.vb_cache.clear();
   g.idx_cache.clear();
-  g.bound_root = nullptr;
-  g.bound_pso = nullptr;
+  invalidate_bound();
+  // As cópias de constantes estavam no anel deste slot, que recomeça do início.
+  for (Renderer::ConstCopy* c : {&g.cc_vs, &g.cc_ps, &g.cc_fetch, &g.cc_bools, &g.cc_sys, &g.cc_vf}) c->va = 0;
   g.srv_tables.clear();
   g.smp_tables.clear();
+  g.desc_cache.clear();
   g.stat_submits++;
   g.srv_next = 0;
   g.sampler_next = 0;
@@ -480,6 +598,68 @@ D3D12_GPU_VIRTUAL_ADDRESS upload_alu(const uint32_t* src, const uint64_t used[4]
     i = j;
   }
   return va;
+}
+
+// Igualdade de blocos (múltiplos de 4 bytes): o memcmp do msvcrt compara byte a byte e custava ~1 µs por desenho.
+inline bool same_bytes(const void* a, const void* b, size_t n) {
+  const uint8_t *x = static_cast<const uint8_t*>(a), *y = static_cast<const uint8_t*>(b);
+  uint64_t diff = 0;
+  size_t i = 0;
+  for (; i + 32 <= n; i += 32) {
+    uint64_t a0, a1, a2, a3, b0, b1, b2, b3;
+    std::memcpy(&a0, x + i, 8), std::memcpy(&a1, x + i + 8, 8), std::memcpy(&a2, x + i + 16, 8), std::memcpy(&a3, x + i + 24, 8);
+    std::memcpy(&b0, y + i, 8), std::memcpy(&b1, y + i + 8, 8), std::memcpy(&b2, y + i + 16, 8), std::memcpy(&b3, y + i + 24, 8);
+    if ((a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3)) return false;
+  }
+  for (; i + 4 <= n; i += 4) {
+    uint32_t u, v;
+    std::memcpy(&u, x + i, 4), std::memcpy(&v, y + i, 4);
+    diff |= u ^ v;
+  }
+  for (; i < n; i++) diff |= x[i] ^ y[i];
+  return !diff;
+}
+
+// Constantes iguais às do desenho anterior (no mesmo submit) reaproveitam a cópia já no anel: entre desenhos seguidos o jogo
+// reescreve quase sempre os mesmos valores (o mesmo objeto por tile, materiais repetidos). Compara-se com uma cópia na memória
+// normal, mais barato do que escrever outra vez na memória de upload (write-combined) e gastar anel.
+D3D12_GPU_VIRTUAL_ADDRESS upload_cached(Renderer::ConstCopy& c, const void* data, size_t n, size_t reserve = 0) {
+  if (!reserve) reserve = n;
+  if (c.va && c.key == nullptr && c.n == n && c.base == (uint32_t)reserve && same_bytes(c.data, data, n)) return c.va;
+  D3D12_GPU_VIRTUAL_ADDRESS va = 0;
+  uint8_t* p = upload_alloc((reserve + 255) & ~size_t(255), 256, &va);
+  if (!p) return c.va = 0;
+  std::memcpy(p, data, n);
+  if (n <= sizeof c.data) {
+    std::memcpy(c.data, data, n);
+    c.va = va, c.n = (uint32_t)n, c.key = nullptr, c.base = (uint32_t)reserve;
+  } else {
+    c.va = 0;
+  }
+  return va;
+}
+
+// Constantes ALU de um shader: a cópia anterior serve se for do mesmo shader e base, e nenhum dos blocos de 16 vec4 que cobre
+// mudou de valor desde então (constant_generations: o processador de comandos só avança a geração quando um valor muda).
+D3D12_GPU_VIRTUAL_ADDRESS upload_alu_cached(Renderer::ConstCopy& c, const void* shader_key, uint32_t base, const uint32_t* src,
+                                            const uint64_t used[4]) {
+  const uint64_t* gen = constant_generations();
+  if (c.va && c.key == shader_key && c.base == base) {
+    uint64_t newest = 0;
+    for (uint32_t b = base >> 4, e = std::min<uint32_t>((base + 256 + 15) >> 4, 32); b < e; b++) newest = std::max(newest, gen[b]);
+    if (newest <= c.time) return c.va;
+  }
+  const D3D12_GPU_VIRTUAL_ADDRESS va = upload_alu(src, used);
+  c.va = va, c.key = shader_key, c.base = base, c.time = constant_clock();
+  return va;
+}
+
+// Bloco de registos de constantes inteiro (fetch, ou bool + loop): reaproveitado enquanto a geração não mudar.
+D3D12_GPU_VIRTUAL_ADDRESS upload_regs_cached(Renderer::ConstCopy& c, uint32_t gen_block, const void* data, size_t n) {
+  if (c.va && constant_generations()[gen_block] <= c.time) return c.va;
+  c.va = upload_cb(data, n);
+  c.time = constant_clock();
+  return c.va;
 }
 
 uint32_t srv_alloc(uint32_t n) {
@@ -546,6 +726,7 @@ bool create_texture(Texture& t, uint32_t w, uint32_t h, DXGI_FORMAT f, bool rend
     g.device->CreateRenderTargetView(t.res, nullptr, t.rtv);
     t.has_rtv = true;
   }
+  g.bound_om = 0;  // um descritor reaproveitado (o heap dá a volta) pode ser o que está ligado
   return true;
 }
 
@@ -726,7 +907,32 @@ Texture* texture_for(const TextureFetch& f) {
 }
 
 // ---- Render targets da EDRAM ----
+// Últimas superfícies pedidas (os desenhos seguidos usam quase sempre as mesmas): evita o mapa e o cálculo da altura.
+struct RtRecent {
+  uint32_t base, xe_format, pitch, min_height;
+  bool depth;
+  Texture* t;
+};
+RtRecent g_rt_recent[8];
+uint32_t g_rt_recent_n = 0, g_rt_recent_next = 0;
+void forget_recent_rts() { g_rt_recent_n = g_rt_recent_next = 0; }
+
+Texture* render_target_slow(uint32_t base, uint32_t xe_format, uint32_t pitch, bool depth, uint32_t min_height);
 Texture* render_target(uint32_t base, uint32_t xe_format, uint32_t pitch, bool depth, uint32_t min_height) {
+  for (uint32_t i = 0; i < g_rt_recent_n; i++) {
+    const RtRecent& r = g_rt_recent[i];
+    if (r.base == base && r.xe_format == xe_format && r.pitch == pitch && r.min_height == min_height && r.depth == depth) return r.t;
+  }
+  Texture* t = render_target_slow(base, xe_format, pitch, depth, min_height);
+  if (t) {
+    g_rt_recent[g_rt_recent_next] = {base, xe_format, pitch, min_height, depth, t};
+    g_rt_recent_next = (g_rt_recent_next + 1) % 8;
+    g_rt_recent_n = std::max(g_rt_recent_n, g_rt_recent_next == 0 ? 8u : g_rt_recent_next);
+  }
+  return t;
+}
+
+Texture* render_target_slow(uint32_t base, uint32_t xe_format, uint32_t pitch, bool depth, uint32_t min_height) {
   if (!pitch) pitch = kWidth;
   DXGI_FORMAT f = depth ? DXGI_FORMAT_D24_UNORM_S8_UINT : (DXGI_FORMAT)color_rt_dxgi(xe_format);
   RtKey key{base, (uint32_t)f, pitch, depth};
@@ -740,6 +946,7 @@ Texture* render_target(uint32_t base, uint32_t xe_format, uint32_t pitch, bool d
   uint32_t h = std::min(scaled((float)logical_h), kMaxTexture);
   if (t.res && t.height >= h) return &t;
   if (t.res) g.garbage.push_back(t.res), t.res = nullptr;  // recriado maior (conteúdo perdido)
+  forget_recent_rts();  // outra chave com a mesma superfície pode ter guardado uma altura menor
   if (!create_texture(t, std::min(scaled((float)std::min<uint32_t>(pitch, 8192)), kMaxTexture), h, f, !depth, depth)) return nullptr;
   if (depth) g.list->ClearDepthStencilView(t.dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
   else {
@@ -939,7 +1146,7 @@ void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_stat
   uint32_t slot = srv_alloc(1);
   write_srv(src, slot, swizzle);
   g.list->SetPipelineState(pso);
-  g.bound_root = nullptr, g.bound_pso = nullptr;
+  invalidate_bound();
   g.list->SetGraphicsRootSignature(g.blit_root);
   float c[8] = {sx / src.width - dx * (sw / dw) / src.width, sy / src.height - dy * (sh / dh) / src.height,
                 (sw / dw) / src.width, (sh / dh) / src.height, linear ? 1.0f : 0.0f, (float)depth_mode,
@@ -1137,9 +1344,14 @@ Compiled* shader(bool pixel) {
   const std::vector<uint32_t>& u = pixel ? g.ps_ucode : g.vs_ucode;
   if (u.empty()) return nullptr;
   uint64_t h = (pixel ? g.ps_hash : g.vs_hash) ^ (pixel ? 0x5053ull : 0x5653ull);
+  // O mesmo shader do desenho anterior, já pronto: sem procurar no mapa (os nós do unordered_map não mudam de endereço).
+  static uint64_t last_h[2] = {~0ull, ~0ull};
+  static Compiled* last_c[2] = {};
+  if (last_h[pixel] == h && last_c[pixel]) return last_c[pixel];
   auto it = g.shaders.find(h);
   if (it != g.shaders.end()) {
     if (it->second.pending.load(std::memory_order_acquire) && !wait_for_shader(it->second)) return nullptr;
+    if (it->second.blob) last_h[pixel] = h, last_c[pixel] = &it->second;
     return it->second.blob ? &it->second : nullptr;
   }
   Compiled& c = g.shaders[h];
@@ -1476,8 +1688,7 @@ void start_pso_pool() {
 ID3D12PipelineState* pipeline(Compiled* vs, Compiled* ps, const DrawState& s) {
   Prof pf(kProfPso);
   const uint64_t key = pso_key(vs->cache_key ? vs->cache_key : vs->info.hash, ps ? (ps->cache_key ? ps->cache_key : ps->info.hash) : 0, s);
-  auto it = g.psos.find(key);
-  if (it != g.psos.end()) return it->second;
+  if (ID3D12PipelineState** found = g.psos.find(key)) return *found;
   PsoPool& P = g_pso_pool;
   auto take = [&](ID3D12PipelineState** out) {  // com P.mu
     auto d = P.done.find(key);
@@ -1717,10 +1928,74 @@ const uint8_t* physical(uint32_t addr) { return gm::base() + 0xA0000000u + (gpu_
 
 void dump_rgba(ID3D12Resource* res, D3D12_RESOURCE_STATES& state, const std::string& name);
 
+// ---- Predicated tiling: os tiles fundidos num só ----
+// A cena principal não cabe nos 10 MiB da EDRAM e o D3D do Xbox desenha-a em 2 tiles: o mesmo command buffer corre uma vez
+// com a janela em (0, 0) e a tesoura até à linha 512, e outra com a janela em (0, −512) e a tesoura até 208, cada tile
+// seguido dos seus resolves (o 2.º para base + 512 linhas). Durante esse passe o bin_select deixa de ser 0xFFFFFFFF. Aqui
+// as superfícies têm a altura inteira: o 1.º tile é desenhado e resolvido até ao fundo e o 2.º é saltado (no corredor, 1941
+// de 6600 desenhos por frame). Só depois de ver o 2.º tile (fronteira e altura); um tile com deslocamento horizontal, ou um
+// objeto com máscara só de um tile, voltam de vez ao modo exato. GOW_EXACT_TILES=1 desliga.
+struct TileMerge {
+  bool enabled = !std::getenv("GOW_EXACT_TILES");
+  uint32_t boundary = 0, full = 0;  // linha onde começa o 2.º tile; altura total (em uso neste frame)
+  uint32_t seen_boundary = 0, seen_full = 0;  // vistos neste frame: passam a valer no próximo (activate_tiles, no swap)
+  uint64_t first_select = 0;        // bin_select do 1.º tile
+  uint32_t skipped = 0;             // desenhos/resolves saltados (relatório de 120 frames)
+};
+TileMerge g_tiles;
+
+enum TilePass { kNotTiled, kFirstTile, kLaterTile };
+TilePass tile_pass() {
+  if ((bin_select() & 0xFFFFFFFFull) == 0xFFFFFFFFull) return kNotTiled;
+  const uint32_t wo = reg(kPaScWindowOffset);
+  const int32_t ox = (int32_t)(wo << 17) >> 17, oy = (int32_t)((wo >> 16) << 17) >> 17;
+  if (ox != 0) {
+    if (g_tiles.enabled) std::fprintf(stderr, "[d3d12] tiles com deslocamento horizontal (%d): modo exato\n", ox);
+    g_tiles.enabled = false;
+    return kLaterTile;
+  }
+  if (oy == 0) {
+    g_tiles.first_select = bin_select();
+    return kFirstTile;
+  }
+  return kLaterTile;
+}
+
+// Num tile seguinte: aprende a fronteira (do deslocamento da janela) e a altura total (do fundo dos resolves deste tile: a tesoura
+// dos desenhos às vezes fica no máximo) e confirma que o objeto também foi desenhado no 1.º tile. Devolve true se o pacote deve
+// ser saltado (fusão ativa com este layout).
+bool skip_later_tile(bool is_draw, uint32_t resolve_bottom = 0) {
+  const uint32_t wo = reg(kPaScWindowOffset);
+  const int32_t oy = (int32_t)((wo >> 16) << 17) >> 17;
+  const uint32_t boundary = (uint32_t)-oy;
+  if (is_draw && packet_predicated() && g_tiles.first_select && !(bin_mask() & g_tiles.first_select)) {
+    if (g_tiles.enabled) std::fprintf(stderr, "[d3d12] desenho só no 2.º tile (máscara %llX): modo exato\n", (unsigned long long)bin_mask());
+    g_tiles.enabled = false;
+  }
+  if (!g_tiles.enabled || oy >= 0 || boundary > 4096) return false;
+  g_tiles.seen_boundary = boundary;
+  if (resolve_bottom > boundary) g_tiles.seen_full = std::max(g_tiles.seen_full, resolve_bottom);
+  // Um layout novo só vale no frame seguinte (activate_tiles): neste o 1.º tile já foi desenhado só até à fronteira.
+  if (g_tiles.boundary != boundary || !g_tiles.full) return false;
+  g_tiles.skipped++;
+  return true;
+}
+
+void activate_tiles() {
+  if (g_tiles.enabled && g_tiles.seen_boundary && g_tiles.seen_full &&
+      (g_tiles.seen_boundary != g_tiles.boundary || g_tiles.seen_full != g_tiles.full)) {
+    std::fprintf(stderr, "[d3d12] predicated tiling: tiles fundidos (fronteira %u, altura %u)\n", g_tiles.seen_boundary, g_tiles.seen_full);
+    g_tiles.boundary = g_tiles.seen_boundary, g_tiles.full = g_tiles.seen_full;
+  }
+  g_tiles.seen_boundary = g_tiles.seen_full = 0;
+}
+
 // ---- Resolve ----
 void resolve() {
   Prof pf(kProfResolve);
   g.resolves++;
+  g.tex_lookup.clear();
+  g.desc_cache.clear();  // uma cópia de resolve nova pode substituir a textura de um endereço
   uint32_t cc = reg(kRbCopyControl), info = reg(kRbCopyDestInfo), pitch_reg = reg(kRbCopyDestPitch);
   uint32_t src_sel = cc & 7, command = (cc >> 20) & 3;
   bool clear_color = (cc >> 8) & 1, clear_depth = (cc >> 9) & 1;
@@ -1743,6 +2018,12 @@ void resolve() {
   for (int i = 0; i < 3; i++) xs[i] = std::round(xs[i]), ys[i] = std::round(ys[i]);
   float x0 = std::max(0.0f, std::min({xs[0], xs[1], xs[2]})), y0 = std::max(0.0f, std::min({ys[0], ys[1], ys[2]}));
   float x1 = std::max({xs[0], xs[1], xs[2]}), y1 = std::max({ys[0], ys[1], ys[2]});
+  // Tiles fundidos: o resolve do 1.º tile copia (e limpa) até ao fundo; os dos tiles seguintes já estão feitos.
+  if (const TilePass tp = g_tiles.enabled ? tile_pass() : kNotTiled; tp == kLaterTile) {
+    if (skip_later_tile(false, (uint32_t)y1)) return;
+  } else if (tp == kFirstTile && g_tiles.boundary && (uint32_t)y1 == g_tiles.boundary) {
+    y1 = (float)g_tiles.full;
+  }
   // Predicated tiling: cada tile é desenhado com PA_SC_WINDOW_OFFSET e fica na EDRAM a partir da origem; o
   // retângulo do resolve está em coordenadas de ecrã, a fonte na EDRAM é rect + deslocamento.
   uint32_t wo = reg(kPaScWindowOffset);
@@ -1836,10 +2117,11 @@ void resolve() {
     g.trace_lines++;
     std::fprintf(stderr,
                  "[render] resolve frame %llu: fonte %s%u (base %u, fmt %u, pitch %u) rect (%.0f,%.0f)-(%.0f,%.0f) -> "
-                 "0x%08X fmt %u pitch %u×%u cmd %u limpa cor %d prof %d info 0x%08X\n",
+                 "0x%08X fmt %u pitch %u×%u cmd %u limpa cor %d prof %d info 0x%08X janela %08X bin %llX/%llX pred %d\n",
                  (unsigned long long)g.frame, depth ? "prof" : "cor", src_sel, depth ? dinfo & 0xFFF : cinfo & 0xFFF,
                  depth ? 0 : (cinfo >> 16) & 0xF, pitch, x0, y0, x1, y1, dest_base, dest_format, dest_pitch,
-                 dest_height, command, clear_color, clear_depth, info);
+                 dest_height, command, clear_color, clear_depth, info, wo, (unsigned long long)bin_select(),
+                 (unsigned long long)bin_mask(), (int)packet_predicated());
   }
   // Limpezas pedidas pelo resolve (no retângulo, em coordenadas da EDRAM).
   D3D12_RECT rc{(LONG)scaled(sx0), (LONG)scaled(sy0), (LONG)scaled(sx1), (LONG)scaled(sy1)};
@@ -2065,13 +2347,22 @@ void load_shader(bool pixel, std::vector<uint32_t> ucode) {
   else g.vs_ucode = std::move(ucode), g.vs_hash = h;
 }
 
+void load_shader(bool pixel, const std::vector<uint32_t>& ucode, uint64_t hash) {
+  if (!g.active) return;
+  std::vector<uint32_t>& cur = pixel ? g.ps_ucode : g.vs_ucode;
+  uint64_t& cur_hash = pixel ? g.ps_hash : g.vs_hash;
+  if (cur_hash == hash && cur.size() == ucode.size()) return;  // o mesmo shader outra vez (o D3D recarrega-o a cada desenho)
+  cur.assign(ucode.begin(), ucode.end());  // reaproveita a capacidade: sem alocação
+  cur_hash = hash;
+}
+
 // Clears do D3D do X360: rect list em modo só-profundidade (RB_MODECONTROL 5), sem PS, em coordenadas de ecrã, com
 // vértices (x, y, z, r, g, b, a). Para acelerar, a superfície é declarada a 4×MSAA com metade do pitch (1 "píxel" =
 // 2×2 amostras) e, para limpar cor, a base de profundidade aponta para o RT de cor: a palavra D24<<8|stencil escrita na
 // EDRAM é a cor. Aqui cor e profundidade são recursos separados e o MSAA é ignorado, por isso interpretam-se: sem isto
 // o RT de atenuação (branco) ficava com a imagem do frame anterior — a sombra modulada multiplicava sobre ela e o
 // resultado alimentava a iluminação (personagens "fantasma") — e a profundidade dos mapas de sombra não era limpa.
-bool try_clear(uint32_t num) {
+bool try_clear(uint32_t num, bool first_tile) {
   const uint32_t surface = reg(kRbSurfaceInfo), msaa = (surface >> 16) & 3;
   const uint32_t sx = msaa == 2 ? 2 : 1, sy = msaa >= 1 ? 2 : 1;
   const uint32_t pitch = (surface & 0x3FFF) * sx;
@@ -2103,6 +2394,8 @@ bool try_clear(uint32_t num) {
     LONG y0 = (LONG)std::round(std::min({ys[0], ys[1], ys[2]})), y1 = (LONG)std::round(std::max({ys[0], ys[1], ys[2]}));
     auto hs = [](LONG v) { return (LONG)std::lround((float)v * g.scale); };
     D3D12_RECT rc{hs((x0 + ox) * (LONG)sx), hs((y0 + oy) * (LONG)sy), hs((x1 + ox) * (LONG)sx), hs((y1 + oy) * (LONG)sy)};
+    // Tiles fundidos: a limpeza do 1.º tile que acaba na fronteira vai até ao fundo (a do 2.º tile é saltada).
+    if (first_tile && g_tiles.boundary && (y1 + oy) * (LONG)sy == (LONG)g_tiles.boundary) rc.bottom = hs((LONG)g_tiles.full);
     float z = rd(r * 3, 2);
     if (vte & 0x10) z *= regf(kPaClVportXscale + 4);
     if (vte & 0x20) z += regf(kPaClVportXscale + 5);
@@ -2143,7 +2436,9 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   Prof pf_draw(kProfDraw);
   uint32_t prim = initiator & 0x3F, source = (initiator >> 6) & 3, num = initiator >> 16;
   static const bool no_clear_hack = std::getenv("GOW_NO_DRAW_CLEARS") != nullptr;
-  if (mode == 5 && prim == 8 && source == 2 && !no_clear_hack && try_clear(num)) return;
+  TilePass tp = g_tiles.enabled ? tile_pass() : kNotTiled;
+  if (tp == kLaterTile && skip_later_tile(true)) return;
+  if (mode == 5 && prim == 8 && source == 2 && !no_clear_hack && try_clear(num, tp == kFirstTile)) return;
   bool i32 = (initiator >> 11) & 1;
   if (!num) return;
   Compiled* vs = shader(false);
@@ -2178,12 +2473,10 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   uint64_t idx_key = 0;
   if (source == 0) {
     const uint8_t* p = physical(dma_base & ~(i32 ? 3u : 1u));
-    const size_t bytes = (size_t)num * (i32 ? 4 : 2), n = std::min<size_t>(bytes, 1024);
+    const size_t bytes = (size_t)num * (i32 ? 4 : 2), n = std::min<size_t>(bytes, 256);
     idx_key = hash_bytes(p, n) ^ hash_bytes(p + bytes - n, n) * 3 ^ (uint64_t)dma_base << 20 ^ (uint64_t)num * 0x100000001B3ull ^
               (uint64_t)(prim | (i32 ? 64u : 0u) | (restart ? 128u : 0u) | (dma_size >> 30) << 8) << 50 ^ (uint64_t)reg(kVgtMultiPrimIbResetIndx) * 31;
-    if (auto it = g.idx_cache.find(idx_key); it != g.idx_cache.end()) {
-      idx_va = it->second.va, host_count = it->second.count, topo = it->second.topo, st.topology = it->second.type;
-    }
+    if (const Renderer::IndexCopy* e = g.idx_cache.find(idx_key)) idx_va = e->va, host_count = e->count, topo = e->topo, st.topology = e->type;
   }
   if (!idx_va) {
     std::vector<uint32_t> gi(num);
@@ -2212,6 +2505,9 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   // Render targets
   uint32_t surface = reg(kRbSurfaceInfo), pitch = surface & 0x3FFF;
   uint32_t br = reg(kPaScWindowScissorBr), tl = reg(kPaScWindowScissorTl);
+  // 1.º tile com a fusão ativa: a tesoura que acaba na fronteira passa a ir até ao fundo.
+  if (tp == kFirstTile && g_tiles.boundary && ((br >> 16) & 0x3FFF) == g_tiles.boundary)
+    br = (br & 0x8000FFFFu) | (g_tiles.full << 16);
   uint32_t min_h = (br >> 16) & 0x3FFF;
   st.color_mask = reg(kRbColorMask);
   D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4];
@@ -2319,7 +2615,27 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   // Só os slots que o PS amostra: os restantes descritores da tabela nunca são lidos (32 SRVs + 32 samplers por
   // desenho custavam vários ms/frame).
   const uint32_t used_tex = ps ? ps->info.texture_mask : 0;
-  for (uint32_t k = 0; k < 32; k++) {
+  uint32_t srv_base, smp_base;
+  bool desc_hit = false;
+  const bool desc_cacheable = used_tex && !(g.trace && traced_frame());
+  if (desc_cacheable) {
+    if (const Renderer::DescCache* dcp = g.desc_cache.find((uint64_t)(uintptr_t)ps)) {
+      const uint64_t* gen = constant_generations();
+      uint64_t newest = 0;
+      for (uint32_t m = used_tex; m; m &= m - 1) newest = std::max(newest, gen[kConstGenFetchSlot + __builtin_ctz(m)]);
+      if (newest <= dcp->time) {
+        const Renderer::DescCache& dc = *dcp;
+        desc_hit = true;
+        srv_base = dc.srv_base, smp_base = dc.smp_base;
+        for (uint32_t m = used_tex; m; m &= m - 1) {
+          const uint32_t k = __builtin_ctz(m);
+          transition(*dc.tex[k], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+          std::memcpy(sys.tex_size[k], dc.size[k], sizeof dc.size[k]);
+        }
+      }
+    }
+  }
+  for (uint32_t k = 0; k < 32 && !desc_hit; k++) {
     if (!(used_tex & (1u << k))) continue;
     Texture* t = &g.dummy;
     TextureFetch tf{};
@@ -2327,8 +2643,22 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
       std::memcpy(tf.dword, cr + (kConstFetch - 0x4000) + k * 6, 24);
       // O tipo tem de bater com a declaração do shader (Texture2D / TextureCube).
       const bool want_cube = (ps->info.cube_mask >> k) & 1;
-      if (want_cube) t = (tf.dword[0] & 3) == 2 && tf.dimension() == 3 ? cube_texture_for(tf) : &g.dummy_cube;
-      else if ((tf.dword[0] & 3) == 2 && tf.dimension() != 3) t = texture_for(tf);
+      uint64_t lk = want_cube ? 0x9E3779B97F4A7C15ull : 0;
+      for (int w = 0; w < 6; w++) lk = (lk ^ tf.dword[w]) * 0x100000001B3ull, lk ^= lk >> 31;
+      const Renderer::TexLookup* lit = g.tex_lookup.find(lk);
+      if (lit && lit->cube == want_cube && same_bytes(lit->dw, tf.dword, 24)) {
+        t = lit->t;
+      } else {
+        if (want_cube) t = (tf.dword[0] & 3) == 2 && tf.dimension() == 3 ? cube_texture_for(tf) : &g.dummy_cube;
+        else if ((tf.dword[0] & 3) == 2 && tf.dimension() != 3) t = texture_for(tf);
+        // Nos frames de diagnóstico cada desenho volta a procurar (o trace regista cada textura).
+        if (!(g.trace && traced_frame())) {
+          Renderer::TexLookup& e = g.tex_lookup[lk];
+          std::memcpy(e.dw, tf.dword, 24);
+          e.cube = want_cube;
+          e.t = t;
+        }
+      }
       sys.tex_size[k][0] = (float)tf.width();
       sys.tex_size[k][1] = (float)tf.height();
       // UV: 1 em texturas da memória; numa cópia de resolve, a parte que o fetch descreve.
@@ -2353,6 +2683,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   // Desenhos seguidos usam quase sempre os mesmos materiais: reaproveitam-se as tabelas de descritores deste submit. Os
   // samplers têm chave própria porque o heap só leva 1024 por slot (32 tabelas), e havia 10 submits por frame só por isso;
   // as combinações de filtro e endereçamento são poucas.
+  if (!desc_hit) {
   uint64_t srv_key = used_tex, smp_key = used_tex;
   for (uint32_t k = 0; k < 32; k++) {
     if (!(used_tex & (1u << k))) continue;
@@ -2360,23 +2691,33 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     srv_key = srv_key * 0x100000001B3ull ^ (uint64_t)(uintptr_t)slot_tex[k]->res;
     smp_key = smp_key * 0x100000001B3ull ^ (uint64_t)sd.Filter ^ (uint64_t)sd.AddressU << 12 ^ (uint64_t)sd.AddressV << 18;
   }
-  uint32_t srv_base, smp_base;
-  if (auto it = g.srv_tables.find(srv_key); it != g.srv_tables.end()) {
-    srv_base = it->second;
+  if (const uint32_t* e = g.srv_tables.find(srv_key)) {
+    srv_base = *e;
   } else {
     srv_base = srv_alloc(32);
     for (uint32_t k = 0; k < 32; k++)
       if (used_tex & (1u << k)) write_srv(*slot_tex[k], srv_base + k);  // a swizzle da constante de fetch é aplicada no shader (xe_tswz)
     g.srv_tables[srv_key] = srv_base;
   }
-  if (auto it = g.smp_tables.find(smp_key); it != g.smp_tables.end()) {
-    smp_base = it->second;
+  if (const uint32_t* e = g.smp_tables.find(smp_key)) {
+    smp_base = *e;
   } else {
     // Só até ao último slot usado: os seguintes da tabela nunca são lidos, e o heap é pequeno.
     smp_base = sampler_alloc(used_tex ? 32 - (uint32_t)__builtin_clz(used_tex) : 1);
     for (uint32_t k = 0; k < 32; k++)
       if (used_tex & (1u << k)) g.device->CreateSampler(&slot_smp[k], cpu_handle(g.sampler_heap, g.sampler_inc, smp_base + k));
     g.smp_tables[smp_key] = smp_base;
+  }
+  if (desc_cacheable) {  // depois das reservas: um submit nelas esvazia a cache
+    Renderer::DescCache& dc = g.desc_cache[(uint64_t)(uintptr_t)ps];
+    dc.time = constant_clock();
+    dc.srv_base = srv_base, dc.smp_base = smp_base;
+    for (uint32_t m = used_tex; m; m &= m - 1) {
+      const uint32_t k = __builtin_ctz(m);
+      dc.tex[k] = slot_tex[k];
+      std::memcpy(dc.size[k], sys.tex_size[k], sizeof dc.size[k]);
+    }
+  }
   }
   if (g.dummy.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) transition(g.dummy, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
   // Buffers de vértices
@@ -2403,19 +2744,19 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     static const bool no_vb_cache = std::getenv("GOW_NO_VB_CACHE") != nullptr;
     uint64_t vkey = (uint64_t)gpu_physical(addr) << 32 | size;
     // O mesmo endereço pode ter vértices novos no mesmo submit (anéis dinâmicos da UE3): só se reutiliza a cópia se a
-    // memória convidada não tiver mudado. Amostra de início, meio e fim: um hash completo por desenho custava 14 ms/frame
-    // (buffers estáticos de vários MB partilhados por centenas de desenhos).
+    // memória convidada não tiver mudado. Amostra de início, meio e fim (128 B cada): um hash completo por desenho custava
+    // 14 ms/frame (buffers estáticos de vários MB partilhados por centenas de desenhos), e 512 B ainda 1–2 ms.
     uint64_t vhash = 0;
     if (size) {
       const uint8_t* vp = physical(addr);
-      const uint32_t n = std::min<uint32_t>(size, 512);
+      const uint32_t n = std::min<uint32_t>(size, 128);
       vhash = hash_bytes(vp, n) ^ hash_bytes(vp + (size - n) / 2, n) * 3 ^ hash_bytes(vp + size - n, n) * 5;
     }
-    auto it = g.vb_cache.find(vkey);
-    if (!no_vb_cache && it != g.vb_cache.end() && it->second.hash == vhash) {
-      va = it->second.va;
+    const Renderer::VbCopy* it = g.vb_cache.find(vkey);
+    if (!no_vb_cache && it && it->hash == vhash) {
+      va = it->va;
     } else {
-      if (it != g.vb_cache.end()) g.vb_stale++;
+      if (it) g.vb_stale++;
       uint8_t* p = upload_alloc(std::max<uint32_t>(size, 16), 256, &va);
       if (p && size) std::memcpy(p, physical(addr), size);
       if (p) g.vb_cache[vkey] = {va, vhash};
@@ -2456,17 +2797,20 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   uint32_t vs_base = reg(kSqVsConst) & 0x1FF, ps_base = reg(kSqPsConst) & 0x1FF;
   if (vs_base > 256) vs_base = 0;
   if (ps_base > 256) ps_base = 256;
-  D3D12_GPU_VIRTUAL_ADDRESS cb_vs = upload_alu(cr + vs_base * 4, vs->info.const_used);
-  D3D12_GPU_VIRTUAL_ADDRESS cb_ps = ps ? upload_alu(cr + ps_base * 4, ps->info.const_used) : upload_cb(cr + ps_base * 4, 256 * 16);
-  D3D12_GPU_VIRTUAL_ADDRESS cb_fetch = upload_cb(cr + (kConstFetch - 0x4000), 192 * 4);
-  uint32_t bl[40];
-  std::memcpy(bl, cr + (kConstBool - 0x4000), 8 * 4);
-  std::memcpy(bl + 8, cr + (kConstLoop - 0x4000), 32 * 4);
-  D3D12_GPU_VIRTUAL_ADDRESS cb_bools = upload_cb(bl, sizeof bl);
-  D3D12_GPU_VIRTUAL_ADDRESS cb_sys = upload_cb(&sys, sizeof sys);
-  // O cbuffer declara as 64 entradas: reserva-as todas, copia só as usadas.
-  D3D12_GPU_VIRTUAL_ADDRESS cb_vf = 0;
-  if (uint8_t* p = upload_alloc(sizeof vf, 256, &cb_vf)) std::memcpy(p, vf, (size_t)vf_entries * 16);
+  D3D12_GPU_VIRTUAL_ADDRESS cb_vs = upload_alu_cached(g.cc_vs, vs, vs_base, cr + vs_base * 4, vs->info.const_used);
+  // Sem PS (só profundidade: mapas de sombra, pré-passe) o cbuffer do PS nunca é lido: qualquer endereço válido serve.
+  D3D12_GPU_VIRTUAL_ADDRESS cb_ps = ps ? upload_alu_cached(g.cc_ps, ps, ps_base, cr + ps_base * 4, ps->info.const_used) : cb_vs;
+  D3D12_GPU_VIRTUAL_ADDRESS cb_fetch = upload_regs_cached(g.cc_fetch, kConstGenFetch, cr + (kConstFetch - 0x4000), 192 * 4);
+  D3D12_GPU_VIRTUAL_ADDRESS cb_bools = g.cc_bools.va;
+  if (!cb_bools || constant_generations()[kConstGenBool] > g.cc_bools.time) {
+    uint32_t bl[40];
+    std::memcpy(bl, cr + (kConstBool - 0x4000), 8 * 4);
+    std::memcpy(bl + 8, cr + (kConstLoop - 0x4000), 32 * 4);
+    cb_bools = upload_regs_cached(g.cc_bools, kConstGenBool, bl, sizeof bl);
+  }
+  D3D12_GPU_VIRTUAL_ADDRESS cb_sys = upload_cached(g.cc_sys, &sys, sizeof sys);
+  // O cbuffer declara as 64 entradas: reserva-as todas, copia só as usadas (o resto da reserva nunca é lido).
+  D3D12_GPU_VIRTUAL_ADDRESS cb_vf = upload_cached(g.cc_vf, vf, (size_t)vf_entries * 16, sizeof vf);
   if (!idx_va) {
     uint8_t* ip = upload_alloc(host.size() * 4, 256, &idx_va);
     if (!ip) return;
@@ -2476,24 +2820,43 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   pf_const.stop();
   Prof pf_rec(kProfRecord);
   // Gravação
+  // Só o que mudou desde o desenho anterior (invalidate_bound repõe tudo depois de um submit ou de um blit).
   if (g.bound_root != g.root) g.list->SetGraphicsRootSignature(g.root), g.bound_root = g.root;
   if (g.bound_pso != pso) g.list->SetPipelineState(pso), g.bound_pso = pso;
-  g.list->SetGraphicsRootConstantBufferView(0, cb_vs);
-  g.list->SetGraphicsRootConstantBufferView(1, cb_ps);
-  g.list->SetGraphicsRootConstantBufferView(2, cb_fetch);
-  g.list->SetGraphicsRootConstantBufferView(3, cb_bools);
-  g.list->SetGraphicsRootConstantBufferView(4, cb_sys);
-  g.list->SetGraphicsRootShaderResourceView(5, idx_va);
-  g.list->SetGraphicsRootShaderResourceView(6, ring_base);
-  g.list->SetGraphicsRootConstantBufferView(7, cb_vf);
-  g.list->SetGraphicsRootDescriptorTable(8, gpu_handle(g.srv_heap, g.srv_inc, srv_base));
-  g.list->SetGraphicsRootDescriptorTable(9, gpu_handle(g.sampler_heap, g.sampler_inc, smp_base));
-  g.list->OMSetRenderTargets(st.num_rt, st.num_rt ? rtvs : nullptr, FALSE, depth ? &depth->dsv : nullptr);
-  float bf[4] = {regf(kRbBlendRed), regf(kRbBlendRed + 1), regf(kRbBlendRed + 2), regf(kRbBlendRed + 3)};
-  g.list->OMSetBlendFactor(bf);
-  g.list->OMSetStencilRef(st.stencil & 0xFF);
-  D3D12_VIEWPORT vp{0, 0, (float)first->width, (float)first->height, 0, 1};
-  g.list->RSSetViewports(1, &vp);
+  const D3D12_GPU_VIRTUAL_ADDRESS cbvs[8] = {cb_vs, cb_ps, cb_fetch, cb_bools, cb_sys, 0, 0, cb_vf};
+  for (UINT i : {0u, 1u, 2u, 3u, 4u, 7u})
+    if (g.bound_cbv[i] != cbvs[i]) g.list->SetGraphicsRootConstantBufferView(i, cbvs[i]), g.bound_cbv[i] = cbvs[i];
+  if (g.bound_srv_root[0] != idx_va) g.list->SetGraphicsRootShaderResourceView(5, idx_va), g.bound_srv_root[0] = idx_va;
+  if (g.bound_srv_root[1] != ring_base) g.list->SetGraphicsRootShaderResourceView(6, ring_base), g.bound_srv_root[1] = ring_base;
+  if (g.bound_tables[0] != srv_base)
+    g.list->SetGraphicsRootDescriptorTable(8, gpu_handle(g.srv_heap, g.srv_inc, srv_base)), g.bound_tables[0] = srv_base;
+  if (g.bound_tables[1] != smp_base)
+    g.list->SetGraphicsRootDescriptorTable(9, gpu_handle(g.sampler_heap, g.sampler_inc, smp_base)), g.bound_tables[1] = smp_base;
+  {
+    // Alvos: os descritores identificam a combinação (cada RT/DSV tem o seu); a chave junta-os com o número e o viewport.
+    uint64_t om = st.num_rt | (uint64_t)(depth ? depth->dsv.ptr : 0) << 4;
+    for (uint32_t i = 0; i < st.num_rt; i++) om = om * 0x100000001B3ull ^ rtvs[i].ptr;
+    om = om * 31 ^ ((uint64_t)first->width << 32 | first->height);
+    if (!om) om = 1;
+    if (g.bound_om != om) {
+      g.list->OMSetRenderTargets(st.num_rt, st.num_rt ? rtvs : nullptr, FALSE, depth ? &depth->dsv : nullptr);
+      D3D12_VIEWPORT vp{0, 0, (float)first->width, (float)first->height, 0, 1};
+      g.list->RSSetViewports(1, &vp);
+      g.bound_om = om;
+    }
+  }
+  {
+    const uint32_t bfr[4] = {reg(kRbBlendRed), reg(kRbBlendRed + 1), reg(kRbBlendRed + 2), reg(kRbBlendRed + 3)};
+    uint64_t misc = 0x8000000000000000ull | (st.stencil & 0xFF);
+    for (uint32_t v : bfr) misc = misc * 0x100000001B3ull ^ v;
+    if (g.bound_misc != misc) {
+      float bf[4];
+      std::memcpy(bf, bfr, sizeof bf);
+      g.list->OMSetBlendFactor(bf);
+      g.list->OMSetStencilRef(st.stencil & 0xFF);
+      g.bound_misc = misc;
+    }
+  }
   LONG sx0 = tl & 0x3FFF, sy0 = (tl >> 16) & 0x3FFF, sx1 = br & 0x3FFF, sy1 = (br >> 16) & 0x3FFF;
   if (!((tl >> 31) & 1)) {  // window_offset_disable = 0: o deslocamento da janela também move a tesoura
     uint32_t wo = reg(kPaScWindowOffset);
@@ -2504,8 +2867,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
                 std::min<LONG>((LONG)std::lround(sx1 * g.scale), first->width),
                 std::min<LONG>((LONG)std::lround(sy1 * g.scale), first->height)};
   if (sc.right <= sc.left || sc.bottom <= sc.top) sc = {0, 0, (LONG)first->width, (LONG)first->height};
-  g.list->RSSetScissorRects(1, &sc);
-  g.list->IASetPrimitiveTopology(topo);
+  if (!same_bytes(&g.bound_scissor, &sc, sizeof sc)) g.list->RSSetScissorRects(1, &sc), g.bound_scissor = sc;
+  if (g.bound_topo != topo) g.list->IASetPrimitiveTopology(topo), g.bound_topo = topo;
   g.list->DrawInstanced(host_count, 1, 0, 0);
   g.draws++;
   // GOW_TRACE_AFTER_RESOLVE=N: só os desenhos depois do resolve N (passes de pós-processamento), com estado.
@@ -2513,9 +2876,11 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   static const uint32_t trace_max = std::getenv("GOW_TRACE_MAX") ? (uint32_t)std::atoi(std::getenv("GOW_TRACE_MAX")) : 400;
   if (g.trace && traced_frame() && g.trace_lines < trace_max && g.resolves >= trace_after) {
     g.trace_lines++;
-    if (trace_after)
-      std::fprintf(stderr, "[render] estado: blend %08X máscara %08X depth %08X stencil %08X depthinfo %08X scissor (%ld,%ld)-(%ld,%ld) janela %08X cull %X%c",
-                   st.blend[0], st.color_mask, st.depth_control, st.stencil, reg(kRbDepthInfo), sc.left, sc.top, sc.right, sc.bottom, reg(kPaScWindowOffset), st.cull, 10);
+    static const bool trace_state = std::getenv("GOW_TRACE_AFTER_RESOLVE") != nullptr;  // =0: estado de todos os desenhos
+    if (trace_state)
+      std::fprintf(stderr, "[render] estado: blend %08X máscara %08X depth %08X stencil %08X depthinfo %08X scissor (%ld,%ld)-(%ld,%ld) janela %08X cull %X bin %llX/%llX pred %d%c",
+                   st.blend[0], st.color_mask, st.depth_control, st.stencil, reg(kRbDepthInfo), sc.left, sc.top, sc.right, sc.bottom, reg(kPaScWindowOffset), st.cull,
+                   (unsigned long long)bin_select(), (unsigned long long)bin_mask(), (int)packet_predicated(), 10);
     std::string tex;
     for (uint32_t k = 0; k < 32; k++)
       if (ps && (ps->info.texture_mask & (1u << k))) {
@@ -2614,7 +2979,10 @@ void present_progress(const wchar_t* line, float frac) {
 
 void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t fetch[6]) {
   if (!g.active) return;
+  Prof pf_swap(kProfSwap);
   g.swaps++;
+  g.tex_lookup.clear();
+  g.desc_cache.clear();  // frame novo: a memória das texturas volta a ser verificada
   // Ecrãs com poucos desenhos (título, carregamento) e shaders ainda a preparar (a preparação do launcher que continuou no jogo,
   // ou o varrimento da memória): espera aqui com uma barra no ecrã, em vez de entrar no nível com shaders em falta. Em jogo
   // nunca espera: o que falta compila em fundo e passa à frente quando um desenho o pede. GOW_NO_PREBUILD_WAIT=1 desliga.
@@ -2718,7 +3086,10 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   }
   transition(bb, bb_state, D3D12_RESOURCE_STATE_PRESENT);
   submit();
-  g.swapchain->Present(config::get().vsync ? 1 : 0, 0);
+  {
+    Prof pf_present(kProfPresent);
+    g.swapchain->Present(config::get().vsync ? 1 : 0, 0);
+  }
   {
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - g.last_present).count();
@@ -2750,8 +3121,12 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     std::snprintf(title_, sizeof title_, "Gears of War (recompilado) - frame %llu, %u desenhos, %u resolves",
                   (unsigned long long)g.frame, g.draws, g.resolves);
     window::set_title((title_ + net::status()).c_str());
-    std::fprintf(stderr, "[d3d12] frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames; pior frame %.0f ms, %u acima de 50 ms; shaders: %llu pedidos por desenhos, %u por pré-compilar\n",
-                 (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
+    static auto fps_t0 = std::chrono::steady_clock::now();
+    const auto fps_now = std::chrono::steady_clock::now();
+    const double fps = 120.0 / std::max(1e-3, std::chrono::duration<double>(fps_now - fps_t0).count());
+    fps_t0 = fps_now;
+    std::fprintf(stderr, "[d3d12] %.1f FPS, frame %llu: %u desenhos, %u ignorados, %u resolves, %zu shaders, %zu PSOs, %zu RTs, %llu vértices refeitos, %u submits (a meio: upload %u, SRV %u, samplers %u) e %u recursos criados em 120 frames; pior frame %.0f ms, %u acima de 50 ms; shaders: %llu pedidos por desenhos, %u por pré-compilar\n",
+                 fps, (unsigned long long)g.frame, g.draws, g.skipped, g.resolves, g.shaders.size(), g.psos.size(),
                  g.rts.size(), (unsigned long long)g.vb_stale, g.stat_submits, g.stat_early[0], g.stat_early[1], g.stat_early[2], g.stat_creates, g.stat_worst_ms, g.stat_slow_frames, (unsigned long long)g_demand_compiles.load(), g_prebuild_left.load());
     {
       std::string parts;
@@ -2777,8 +3152,13 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
         line += b;
         g_prof[i] = 0;
       }
-      std::fprintf(stderr, "[perf] ms/frame: total %.1f (%.1f fps) |%s\n", g_prof_frame_ms / 120,
-                   120000.0 / std::max(1.0, g_prof_frame_ms), line.c_str());
+      // Parado: anel vazio (o jogo ainda não mandou o frame seguinte = limite do CPU convidado) e WAIT_REG_MEM.
+      static uint64_t last_idle = 0, last_wait = 0, last_busy = 0;
+      const uint64_t idle = idle_micros(), wait = wait_micros(), busy = busy_micros();
+      std::fprintf(stderr, "[perf] ms/frame: total %.1f (%.1f fps) | parado: anel vazio %.1f, WAIT_REG_MEM %.1f | lotes %.1f |%s\n", g_prof_frame_ms / 120,
+                   120000.0 / std::max(1.0, g_prof_frame_ms), (idle - last_idle) / 120000.0, (wait - last_wait) / 120000.0,
+                   (busy - last_busy) / 120000.0, line.c_str());
+      last_idle = idle, last_wait = wait, last_busy = busy;
       g_prof_frame_ms = 0;
     }
   }
@@ -2792,6 +3172,11 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   if (g_pso_lib.unsaved && g.draws < 400 && std::chrono::steady_clock::now() - g_pso_lib.last_save > std::chrono::seconds(10)) {
     save_pso_library();
     save_pso_list();
+  }
+  activate_tiles();
+  if (g.frame % 120 == 0 && g_tiles.skipped) {
+    std::fprintf(stderr, "[d3d12] tiles fundidos: %u desenhos e resolves do 2.º tile saltados em 120 frames\n", g_tiles.skipped);
+    g_tiles.skipped = 0;
   }
   g_last_draws = g.draws;
   g_pso_wait_ms = 0;
@@ -2807,6 +3192,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
       for (auto& [key, t] : *m)
         if (t.res) g.garbage.push_back(t.res);
       m->clear();
+      forget_recent_rts();
     }
     for (auto& [key, t] : g.resolved)
       if (t.res) g.garbage.push_back(t.res);

@@ -24,6 +24,10 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
   (`AdaptiveFps=1`, por omissão), uma cena que não aguenta 60 fica a 30 estáveis em vez de oscilar.
 - **Cache de PSOs:** os pipelines compilados pelo driver ficam em `user_data/shader_cache/pipelines.bin` e a lista dos usados em
   `pso_list.bin`; no arranque seguinte são recriados em fundo, por isso os picos ao entrar numa zona só acontecem na 1.ª visita.
+- **Tiles da EDRAM fundidos:** o Xbox 360 desenha a cena principal duas vezes (metade de cima e de baixo, por não caber na EDRAM);
+  aqui as superfícies têm a altura inteira e cada objeto é desenhado uma só vez. Com isto e um processador de comandos mais
+  leve, o corredor mais pesado do 1.º nível (≈6600 desenhos por frame) passou de ~38 a 60 FPS. `GOW_EXACT_TILES=1` volta ao
+  modo do hardware.
 - **Tradutor de shaders Xenos:** microcódigo da GPU do Xbox 360 convertido em HLSL, com cache em disco.
 - **Launcher com pré-compilação:** antes do jogo, procura os 17 mil shaders nos pacotes do disco (com descompressão LZO) e
   compila-os com todos os núcleos, com barra de progresso; o pacote traz-os já compilados (`prebuilt_shaders.bin`).
@@ -178,6 +182,10 @@ It is not an emulator and does not use the original source code.
   (`AdaptiveFps=1`, the default), a scene that cannot hold 60 stays at a steady 30 instead of oscillating.
 - **PSO cache:** pipelines compiled by the driver are kept in `user_data/shader_cache/pipelines.bin` and the list of used ones in
   `pso_list.bin`; on the next start they are recreated in the background, so hitches when entering an area only happen once.
+- **Merged EDRAM tiles:** the Xbox 360 draws the main scene twice (top and bottom halves, because it does not fit in EDRAM);
+  here the surfaces have the full height and each object is drawn once. With this and a lighter command processor, the
+  heaviest corridor of the first level (≈6,600 draws per frame) went from ~38 to 60 FPS. `GOW_EXACT_TILES=1` restores the
+  hardware behaviour.
 - **Xenos shader translator:** Xbox 360 GPU microcode converted to HLSL, with a disk cache.
 - **Launcher with shader precompilation:** before the game starts, it finds the 17,000 shaders in the disc packages
   (LZO-decompressing them) and compiles them on every core, with a progress bar; the package ships them precompiled

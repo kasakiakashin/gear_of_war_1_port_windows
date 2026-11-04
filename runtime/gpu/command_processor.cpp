@@ -26,6 +26,7 @@
 #include <map>
 #include <mutex>
 #include <tuple>
+#include <unordered_map>
 #include <thread>
 #include <vector>
 
@@ -35,6 +36,7 @@
 #include "guest_memory.h"
 #include "kernel/kernel.h"
 #include "kernel/thread.h"
+#include "gpu/xenos_shader.h"
 
 namespace gpu {
 namespace {
@@ -66,6 +68,7 @@ std::atomic<uint32_t> g_cur_op{0}, g_cur_pos{0}, g_cur_depth{0}, g_batch_start{0
 std::atomic<uint64_t> g_packets{0};
 uint32_t g_cur_ib = 0;  // endereço físico do buffer indireto em execução (0 = ring); só a thread da GPU
 uint64_t g_bin_mask = ~0ull, g_bin_select = ~0ull;  // predicação (SET_BIN_MASK/SELECT); só a thread da GPU
+bool g_cur_predicated = false;  // o pacote tipo 3 em execução tem o bit de predicação
 // WAIT_REG_MEM por condição {função|mem, endereço/registrador, referência, máscara}: chamadas e tempo de espera.
 using WaitKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
 struct WaitStat {
@@ -73,8 +76,15 @@ struct WaitStat {
 };
 std::mutex g_wait_stats_mu;
 std::map<WaitKey, WaitStat> g_wait_stats;
+// Tempo total parado (µs): anel vazio (à espera de comandos do jogo) e em WAIT_REG_MEM. Para o GOW_PROFILE_GPU.
+std::atomic<uint64_t> g_idle_us{0}, g_wait_us{0}, g_busy_us{0};
 
-uint8_t* mem() { return gm::base(); }
+// A reserva da memória convidada não muda depois do arranque (a GPU só começa depois dela): sem a chamada fora de linha a
+// gm::base() em cada dword lido do anel e em cada registo escrito.
+uint8_t* mem() {
+  static uint8_t* const base = gm::base();
+  return base;
+}
 uint32_t phys(uint32_t a) { return 0xA0000000u | (a & 0x1FFFFFFFu); }  // físico -> espelho virtual
 
 uint32_t g_scratch_seen[8] = {};  // último valor de cada SCRATCH_REGn já espelhado (só a thread da GPU)
@@ -84,10 +94,27 @@ uint32_t reg(uint32_t i) {
   return i < 0x4000 ? ppc_ld32(mem(), gm::kGpuRegBase + 4 * i) : g_high_regs[i - 0x4000];
 }
 
+// Geração de cada bloco de constantes (ver constant_generations): o relógio global na última escrita que mudou um valor.
+uint64_t g_const_gen[kConstGenBlocks] = {};
+uint64_t g_const_clock = 0;
+
 void set_reg(uint32_t i, uint32_t v) {
   i &= 0xFFFF;
   if (i >= 0x4000) {
-    g_high_regs[i - 0x4000] = v;
+    uint32_t& slot = g_high_regs[i - 0x4000];
+    if (slot == v) return;
+    slot = v;
+    // ALU 0x4000..0x47FF em blocos de 16 vec4; fetch 0x4800..0x48FF por slot de textura (6 dwords) e no todo; bool/loop.
+    const uint32_t k = i - 0x4000;
+    if (k < 0x800) {
+      g_const_gen[k >> 6] = ++g_const_clock;
+    } else if (k < 0x900) {
+      const uint64_t t = ++g_const_clock;
+      if (k - 0x800 < 192) g_const_gen[kConstGenFetchSlot + (k - 0x800) / 6] = t;
+      g_const_gen[kConstGenFetch] = t;
+    } else if (k < 0xA00) {
+      g_const_gen[kConstGenBool] = ++g_const_clock;
+    }
     return;
   }
   if (i == kRegCoherStatusHost) v &= ~0x80000000u;  // pedido de coerência satisfeito de imediato
@@ -320,6 +347,8 @@ struct Reader {
 void execute(Reader& r, uint32_t end, int depth);
 
 void note_opcode(uint32_t op) {
+  // Só a 1.ª vez: um fetch_add por pacote (operação com lock) custava, com as outras escritas de diagnóstico, ~1 ms/frame.
+  if (g_opcode_seen[op].load(std::memory_order_relaxed)) return;
   if (!g_opcode_seen[op].fetch_add(1))
     std::fprintf(stderr, "[gpu] 1º pacote PM4 tipo 3 opcode 0x%02X\n", op);
 }
@@ -355,7 +384,7 @@ void dump_history(uint32_t addr, bool force = false) {
 
 void execute_type3(Reader& r, uint32_t header, int depth) {
   uint32_t op = (header >> 8) & 0x7F, count = ((header >> 16) & 0x3FFF) + 1;
-  g_cur_op = op;
+  g_cur_op.store(op, std::memory_order_relaxed);
   note_opcode(op);
   if (g_history_addr) {
     HistoryEntry& h = g_history[g_history_pos++ % 24];
@@ -376,6 +405,7 @@ void execute_type3(Reader& r, uint32_t header, int depth) {
     r.skip(count);
     return;
   }
+  g_cur_predicated = header & 1;
   uint32_t d[8] = {};
   auto take = [&](uint32_t n) {  // lê n dwords de dados (n <= count), salta o resto no fim
     for (uint32_t i = 0; i < n && i < 8; i++) d[i] = r.next();
@@ -489,8 +519,9 @@ void execute_type3(Reader& r, uint32_t header, int depth) {
         std::lock_guard<std::mutex> lock(g_wait_stats_mu);
         WaitStat& ws = g_wait_stats[{d[0] & 0x17, d[1], d[2], d[3]}];
         ws.count++;
-        ws.micros += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - t0).count();
+        const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+        ws.micros += us;
+        g_wait_us.fetch_add(us, std::memory_order_relaxed);
       }
       tl("espera 0x%08X: fim", d[1]);
       break;
@@ -553,9 +584,46 @@ void execute_type3(Reader& r, uint32_t header, int depth) {
     case kPm4ImLoad: {  // addr | tipo (0 = vértices, 1 = pixels), start << 16 | tamanho em dwords
       used = take(2);
       uint32_t addr = d[0] & ~3u, n = d[1] & 0xFFFF;
-      std::vector<uint32_t> u(n);
-      for (uint32_t i = 0; i < n; i++) u[i] = ppc_ld32(mem(), phys(addr + 4 * i));
-      render::load_shader((d[0] & 3) == 1, std::move(u));
+      // O D3D carrega o microcódigo a cada desenho (~13 000 por frame no corredor): copiá-lo com troca de bytes para um vector novo
+      // e calcular o hash custava vários ms por frame. Guarda-se a cópia por endereço e só se confirma que a memória é a mesma.
+      struct Ucode {
+        std::vector<uint32_t> raw, host;  // como na memória (BE) / na ordem do host
+        uint64_t hash;
+      };
+      static std::unordered_map<uint64_t, Ucode> cache;
+      const uint64_t key = (uint64_t)addr << 20 | n;
+      const uint8_t* src = mem() + phys(addr);
+      if (phys(addr) + 4ull * n > 0x100000000ull) break;
+      auto it = cache.find(key);
+      bool same = it != cache.end();
+      if (same) {
+        const uint8_t* a = reinterpret_cast<const uint8_t*>(it->second.raw.data());
+        uint64_t diff = 0;
+        size_t i = 0;
+        for (; i + 2 <= n; i += 2) {
+          uint64_t v, w;
+          std::memcpy(&v, src + 4 * i, 8);
+          std::memcpy(&w, a + 4 * i, 8);
+          diff |= v ^ w;
+        }
+        if (i < n) {
+          uint32_t v;
+          std::memcpy(&v, src + 4 * i, 4);
+          diff |= v ^ it->second.raw[i];
+        }
+        same = !diff;
+      }
+      if (!same) {
+        if (cache.size() > 65536) cache.clear();
+        Ucode& u = cache[key];
+        u.raw.resize(n);
+        std::memcpy(u.raw.data(), src, 4ull * n);
+        u.host.resize(n);
+        for (uint32_t i = 0; i < n; i++) u.host[i] = __builtin_bswap32(u.raw[i]);
+        u.hash = hash_words(u.host.data(), n);
+        it = cache.find(key);
+      }
+      render::load_shader((d[0] & 3) == 1, it->second.host, it->second.hash);
       break;
     }
     case kPm4ImLoadImmediate: {  // tipo, start << 16 | tamanho, microcódigo
@@ -613,9 +681,10 @@ void execute_type3(Reader& r, uint32_t header, int depth) {
 
 void execute(Reader& r, uint32_t end, int depth) {
   while (r.pos != end) {
-    g_cur_pos = r.pos;
-    g_cur_depth = (uint32_t)depth;
-    g_packets.fetch_add(1, std::memory_order_relaxed);
+    // Diagnóstico (watchdog): escritas simples, sem lock — só esta thread as escreve.
+    g_cur_pos.store(r.pos, std::memory_order_relaxed);
+    g_cur_depth.store((uint32_t)depth, std::memory_order_relaxed);
+    g_packets.store(g_packets.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     uint32_t h = r.next();
     switch (h >> 30) {
       case 0: {  // escrita em registradores consecutivos (ou num só)
@@ -675,7 +744,10 @@ void command_processor_thread() {
         }
       }
       tl("lote 0x%04X..0x%04X", rptr, wptr);
+      const auto tb = std::chrono::steady_clock::now();
       execute(r, wptr, 0);
+      g_busy_us.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - tb).count(),
+                          std::memory_order_relaxed);
       tl("lote 0x%04X..0x%04X: fim", rptr, wptr);
       rptr = wptr;
       ppc_st32(m, gm::kGpuRegBase + 4 * kRegCpRbRptr, rptr);
@@ -683,7 +755,10 @@ void command_processor_thread() {
       continue;
     }
     sync_scratch();
+    const auto t0 = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(std::chrono::microseconds(200));
+    g_idle_us.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(),
+                        std::memory_order_relaxed);
   }
 }
 
@@ -724,6 +799,14 @@ uint32_t swap_count() { return g_swap_count.load(); }
 
 uint32_t register_value(uint32_t index) { return reg(index); }
 const uint32_t* constant_registers() { return g_high_regs.data(); }
+const uint64_t* constant_generations() { return g_const_gen; }
+uint64_t constant_clock() { return g_const_clock; }
+uint64_t idle_micros() { return g_idle_us.load(std::memory_order_relaxed); }
+uint64_t wait_micros() { return g_wait_us.load(std::memory_order_relaxed); }
+uint64_t busy_micros() { return g_busy_us.load(std::memory_order_relaxed); }
+uint64_t bin_select() { return g_bin_select; }
+bool packet_predicated() { return g_cur_predicated; }
+uint64_t bin_mask() { return g_bin_mask; }
 
 void dump_state() {
   std::fprintf(stderr, "[gpu] renderer: %s\n", render::phase());
