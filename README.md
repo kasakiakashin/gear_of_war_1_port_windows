@@ -21,7 +21,9 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 - **Recompilação estática:** 2,4 milhões de instruções PowerPC (VMX/VMX128 incluído) traduzidas para C++.
 - **Direct3D 12:** resolução interna até 4K e FSR 1.0 (EASU + RCAS).
 - **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real.
-- **Tradutor de shaders Xenos:** microcódigo da GPU do Xbox 360 convertido em HLSL, com compilação em fundo e cache em disco.
+- **Tradutor de shaders Xenos:** microcódigo da GPU do Xbox 360 convertido em HLSL, com cache em disco.
+- **Launcher com pré-compilação:** antes do jogo, procura os 17 mil shaders nos pacotes do disco (com descompressão LZO) e
+  compila-os com todos os núcleos, com barra de progresso; o pacote traz-os já compilados (`prebuilt_shaders.bin`).
 - **Co-op e Versus em System Link por túnel UDP P2P:** no menu **F8**, com um link de convite.
 - **Leitura direta da ISO:** sem extrair 6,22 GB; ficheiros soltos em `extracted/` têm prioridade (mods).
 - **Som:** WASAPI, com áudio XMA descodificado pelo FFmpeg.
@@ -46,8 +48,13 @@ Requisitos: Windows 10/11 de 64 bits, CPU com AVX2, placa gráfica com Direct3D 
 ### Jogar
 
 1. Compile o projeto (ver abaixo) ou use um pacote gerado por `tools/package_release.py`.
-2. Coloque a ISO junto do `gow.exe` ou abra o `gow.exe` e selecione-a quando ele perguntar. **Não é preciso extrair
-   nada:** os ficheiros são lidos da ISO em tempo real.
+2. Abra o `gow.exe`. No launcher, carregue em **Selecionar ISO** se a ISO não estiver na pasta, e depois em
+   **INICIAR JOGO**. **Não é preciso extrair nada:** os ficheiros são lidos da ISO em tempo real.
+
+O launcher tem as mesmas configurações do F8 (vídeo, áudio e idioma, controlos, Co-op: pode hospedar ou colar um convite
+antes de entrar). Os shaders vêm compilados em `prebuilt_shaders.bin` e são lidos diretamente dele; sem esse ficheiro, o
+launcher compila-os a partir do disco (cerca de 15 minutos num CPU de 12 threads, só uma vez). Se carregar em INICIAR JOGO antes do fim, a barra passa para o ecrã
+do jogo. `gow.exe --skip-launcher` salta o launcher; `gow.exe --prepare-shaders [--pack ficheiro]` só prepara os shaders.
 
 Só é aceite a versão para a qual o código foi traduzido. O `gow.exe` compara o SHA-1 da imagem do executável com
 `083d7d0ab2ae1ee6d9d536bc5ca987862ad8c8f7` e recusa outras versões.
@@ -134,6 +141,8 @@ The Coalition, nem conta com a sua autorização.
 - **Um `gow.exe` compilado contém o código do jogo, traduzido para x86-64.** Mesmo sem nenhum ficheiro da ISO, um pacote
   binário distribui portanto uma obra derivada. Quem o publica assume esse risco. Compilar a partir da sua própria
   cópia é a via mais prudente.
+- **`prebuilt_shaders.bin`** também é derivado do jogo: é o microcódigo dos shaders do disco, traduzido e compilado para
+  DXBC. Um pacote sem ele (`package_release.py --no-shaders`) compila os mesmos shaders na máquina de quem joga.
 
 ### Estrutura
 
@@ -163,7 +172,10 @@ It is not an emulator and does not use the original source code.
 - **Static recompilation:** 2.4 million PowerPC instructions (including VMX/VMX128) translated to C++.
 - **Direct3D 12:** internal resolution up to 4K and FSR 1.0 (EASU + RCAS).
 - **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time.
-- **Xenos shader translator:** Xbox 360 GPU microcode converted to HLSL, with background compilation and a disk cache.
+- **Xenos shader translator:** Xbox 360 GPU microcode converted to HLSL, with a disk cache.
+- **Launcher with shader precompilation:** before the game starts, it finds the 17,000 shaders in the disc packages
+  (LZO-decompressing them) and compiles them on every core, with a progress bar; the package ships them precompiled
+  (`prebuilt_shaders.bin`).
 - **Co-op and Versus over System Link through a P2P UDP tunnel:** in the **F8** menu, with an invite link.
 - **Direct ISO reading:** no need to extract 6.22 GB; loose files in `extracted/` take priority (mods).
 - **Sound:** WASAPI, with XMA audio decoded by FFmpeg.
@@ -188,8 +200,13 @@ Requirements: 64-bit Windows 10/11, a CPU with AVX2, a Direct3D 12 graphics card
 ### Playing
 
 1. Build the project (see below) or use a package made by `tools/package_release.py`.
-2. Put the ISO next to `gow.exe`, or open `gow.exe` and select it when asked. **Nothing needs extracting:** files are read
-   from the ISO in real time.
+2. Open `gow.exe`. In the launcher, click **Selecionar ISO** if the ISO is not in the folder, then **INICIAR JOGO**.
+   **Nothing needs extracting:** files are read from the ISO in real time.
+
+The launcher has the same settings as F8 (video, audio and language, controls, co-op: you can host or paste an invite before
+starting). The shaders ship compiled in `prebuilt_shaders.bin` and are read straight from it; without that file, the
+launcher compiles them from the disc (about 15 minutes on a 12-thread CPU, once). If you click INICIAR JOGO before it finishes, the bar moves to the game screen.
+`gow.exe --skip-launcher` skips the launcher; `gow.exe --prepare-shaders [--pack file]` only prepares the shaders.
 
 Only the version the code was translated from is accepted. `gow.exe` compares the SHA-1 of the executable image with
 `083d7d0ab2ae1ee6d9d536bc5ca987862ad8c8f7` and refuses other versions.
@@ -275,6 +292,8 @@ The Coalition.
 - **A built `gow.exe` contains the game's code, translated to x86-64.** Even with no file from the ISO, a binary package
   therefore distributes a derivative work, and whoever publishes it takes on that risk. Building from your own copy is the
   more cautious route.
+- **`prebuilt_shaders.bin`** is derived from the game too: it is the disc's shader microcode, translated and compiled to
+  DXBC. A package without it (`package_release.py --no-shaders`) compiles the same shaders on the player's machine.
 
 ### Layout
 

@@ -2,8 +2,12 @@
 """
 package_release.py - gera dist/GearsOfWar1-PC-Port/ e o .zip a partir do build atual.
 
-O pacote leva apenas uma lista fechada de ficheiros (gow.exe, DLLs do FFmpeg, configuração, leia-me). Depois de o
-criar, o script recusa continuar se encontrar algo que pareça dados do jogo.
+O pacote leva apenas uma lista fechada de ficheiros (gow.exe, DLLs do FFmpeg, configuração, leia-me e
+prebuilt_shaders.bin). Depois de o criar, o script recusa continuar se encontrar algo que pareça dados do jogo.
+
+prebuilt_shaders.bin = DXBC de todos os shaders encontrados nos pacotes do disco, compilado por
+`gow.exe --prepare-shaders --pack` (precisa do jogo: extracted/ ou a ISO). Com ele o launcher só copia a cache e o jogo
+abre sem compilar nada. Tal como o gow.exe, é derivado do jogo (microcódigo dos shaders traduzido): ver "Direitos de autor".
 
 Atenção: gow.exe contém o código do jogo traduzido para x86-64 (generated_src/ compilado). Ver "Direitos de autor" no
 README.md antes de publicar este pacote.
@@ -12,14 +16,16 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "0.5.0"
+DEFAULT_VERSION = "0.6.0"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
+SHADER_PACK = "prebuilt_shaders.bin"  # a única exceção ao .bin de FORBIDDEN
 FORBIDDEN = re.compile(r"\.(iso|xex|xxx|bik|sav|bin|pdb|log)$|^base_image|^extracted|^generated_src|^user_data", re.I)
 
 LEIAME = """Gears of War 1 - port PC (recompilacao estatica) v{version}
@@ -29,16 +35,20 @@ Este pacote NAO contem os dados do jogo. Precisa da sua propria copia do disco d
 Gears of War para Xbox 360, em imagem ISO. Nao e preciso extrair nada.
 
 COMO JOGAR
-  1. Coloque a ISO nesta pasta, junto do gow.exe (qualquer nome terminado em .iso),
-     ou abra o gow.exe e selecione-a quando ele perguntar (o caminho fica no gow_config.ini).
-  2. Abra o gow.exe.
+  1. Abra o gow.exe: aparece o launcher.
+  2. Se a ISO nao estiver nesta pasta (qualquer nome terminado em .iso), carregue em
+     "Selecionar ISO" (o caminho fica no gow_config.ini).
+  3. Carregue em INICIAR JOGO.
+  No launcher estao tambem as configuracoes (as mesmas do F8) e o Co-op (hospedar ou colar
+  um convite antes de entrar). gow.exe --skip-launcher abre o jogo diretamente.
 
 O jogo abre sem janela de consola e sem log. Em caso de crash escreve gow_crash.log nesta pasta.
 Para ver o log: defina GOW_VERBOSE=1 e abra o gow.exe a partir de uma linha de comandos.
 
-Na 1a abertura o jogo cria aqui a pasta user_data\\ (gravacoes, perfil, cache de shaders). Na 1a entrada em cada
-nivel, o ecra de carregamento fica parado 2 a 3 minutos a preparar os shaders (o titulo da janela mostra quantos
-faltam). Da segunda vez ja nao acontece.
+Na 1a abertura o jogo cria aqui a pasta user_data\\ (gravacoes, perfil). Os shaders ja vem compilados em
+prebuilt_shaders.bin e sao lidos diretamente dele: o jogo abre sem esperar. Sem esse ficheiro, o launcher procura os shaders
+nos pacotes do jogo e compila-os com todos os nucleos do CPU, com uma barra de progresso; se carregar em INICIAR
+JOGO antes do fim, a barra continua no ecra do jogo. So acontece da primeira vez.
 Requer Windows 10/11 de 64 bits, CPU com AVX2 e placa grafica com Direct3D 12.
 
 CONTROLOS
@@ -92,6 +102,9 @@ def main():
     ap = argparse.ArgumentParser(description="Empacota o gow.exe para distribuicao")
     ap.add_argument("--version", default=DEFAULT_VERSION)
     ap.add_argument("--build-dir", default=os.path.join(ROOT, "build", "runtime"))
+    ap.add_argument("--shaders", help="prebuilt_shaders.bin já feito com este mesmo gow.exe (senão é gerado agora)")
+    ap.add_argument("--no-shaders", action="store_true", help="sem prebuilt_shaders.bin")
+    ap.add_argument("--user-dir", help="GOW_USER_DIR com a cache de shaders de uma preparação anterior (não é apagado)")
     args = ap.parse_args()
 
     exe = os.path.join(args.build_dir, "gow.exe")
@@ -106,6 +119,22 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(os.path.join(out, "ffmpeg"))
     shutil.copy2(exe, out)
+    pack = os.path.join(out, SHADER_PACK)
+    if args.shaders:
+        shutil.copy2(args.shaders, pack)
+    else:
+        # Cache própria: vazia (compila tudo, ~15 min com 12 threads) ou --user-dir de uma preparação anterior (só verifica).
+        tmp = args.user_dir or os.path.join(dist, "_shader_user_data")
+        if not args.user_dir:
+            shutil.rmtree(tmp, ignore_errors=True)
+        env = dict(os.environ, GOW_USER_DIR=tmp, GOW_NO_DIALOGS="1", GOW_VERBOSE="1")
+        r = subprocess.run([os.path.join(out, "gow.exe"), "--prepare-shaders", "--pack", pack], cwd=ROOT, env=env)
+        if not args.user_dir:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if r.returncode != 0 or not os.path.isfile(pack):
+            sys.exit(f"gow.exe --prepare-shaders falhou ({r.returncode}); use --shaders ficheiro ou --no-shaders")
+    if args.no_shaders and os.path.isfile(pack):
+        os.remove(pack)
     for d in FFMPEG_DLLS:
         shutil.copy2(os.path.join(args.build_dir, "ffmpeg", d), os.path.join(out, "ffmpeg", d))
     with open(os.path.join(out, "gow_config.ini"), "w", encoding="ascii", newline="") as f:
@@ -117,7 +146,7 @@ def main():
     for base, _, names in os.walk(out):
         for n in names:
             rel = os.path.relpath(os.path.join(base, n), out)
-            if FORBIDDEN.search(n) or FORBIDDEN.search(rel):
+            if rel != SHADER_PACK and (FORBIDDEN.search(n) or FORBIDDEN.search(rel)):
                 sys.exit(f"recusado: {rel} parece dados do jogo")
             packed.append(rel)
 
