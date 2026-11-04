@@ -217,7 +217,7 @@ class Interp:
                     bo, bi = d, a
                     if not (bo & 4):
                         ctr = (ctr - 1) & M64
-                    ok_ctr = (bo & 4) or ((ctr != 0) != bool(bo & 2))
+                    ok_ctr = (bo & 4) or (((ctr & 0xFFFFFFFF) != 0) != bool(bo & 2))
                     bit = (cr[bi >> 2] >> (3 - (bi & 3))) & 1
                     ok_c = (bo & 16) or (bit == ((bo >> 3) & 1))
                     take, tgt = ok_ctr and ok_c, (pc + sext(w & 0xFFFC, 16)) & 0xFFFFFFFF
@@ -231,7 +231,7 @@ class Interp:
                 bo, bi = d, a
                 if not (bo & 4):
                     ctr = (ctr - 1) & M64
-                ok_ctr = (bo & 4) or ((ctr != 0) != bool(bo & 2))
+                ok_ctr = (bo & 4) or (((ctr & 0xFFFFFFFF) != 0) != bool(bo & 2))
                 bit = (cr[bi >> 2] >> (3 - (bi & 3))) & 1
                 ok_c = (bo & 16) or (bit == ((bo >> 3) & 1))
                 if ok_ctr and ok_c:

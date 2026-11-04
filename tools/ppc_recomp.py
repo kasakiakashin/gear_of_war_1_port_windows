@@ -1186,8 +1186,11 @@ class Recompiler:
         def cond(bo, bi):
             pre, cs = "", []
             if not (bo & 4):
+                # O decremento é de 64 bits, mas o teste de zero só vê os 32 bits baixos do CTR (como o Xenia: os títulos correm
+                # com semântica de 32 bits). Com o teste de 64 bits, um contador com lixo nos 32 bits altos (ex.: neg de um valor
+                # lido com lwz) não parava: o memset do _cftof2 escrevia zeros até rebentar a pilha a formatar "%.4f" de 0,0332.
                 pre = "--ctx.ctr; "
-                cs.append("ctx.ctr == 0" if bo & 2 else "ctx.ctr != 0")
+                cs.append("(uint32_t)ctx.ctr == 0" if bo & 2 else "(uint32_t)ctx.ctr != 0")
             if not (bo & 16):
                 bit = f"ctx.cr[{bi >> 2}].{CRB[bi & 3]}"
                 cs.append(bit if bo & 8 else f"!{bit}")
