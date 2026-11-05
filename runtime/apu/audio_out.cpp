@@ -13,6 +13,7 @@
 #include <mmdeviceapi.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -195,6 +196,26 @@ void output_submit_frame(const uint8_t* be_planar6) {
     std::memcpy(&f, &v, 4);
     return f;
   };
+  // GOW_DEBUG_AUDIO_DROPS=1: energia de cada canal do XAudio por segundo (diagnóstico de sons que só existem no centro/surround).
+  static const bool debug = std::getenv("GOW_DEBUG_AUDIO_DROPS") != nullptr;
+  if (debug) {
+    static double energy[6] = {}, peak[6] = {};
+    static int frames = 0;
+    for (int ch = 0; ch < 6; ch++)
+      for (int i = 0; i < n; i++) {
+        const double v = rd(ch, i);
+        energy[ch] += v * v;
+        if (std::fabs(v) > peak[ch]) peak[ch] = std::fabs(v);
+      }
+    if (++frames == 188) {  // ~1 s
+      std::fprintf(stderr, "[audio-drops] canais RMS/pico FL %.4f/%.3f FR %.4f/%.3f FC %.4f/%.3f LFE %.4f/%.3f BL %.4f/%.3f BR %.4f/%.3f\n",
+                   std::sqrt(energy[0] / (frames * n)), peak[0], std::sqrt(energy[1] / (frames * n)), peak[1],
+                   std::sqrt(energy[2] / (frames * n)), peak[2], std::sqrt(energy[3] / (frames * n)), peak[3],
+                   std::sqrt(energy[4] / (frames * n)), peak[4], std::sqrt(energy[5] / (frames * n)), peak[5]);
+      for (int ch = 0; ch < 6; ch++) energy[ch] = peak[ch] = 0;
+      frames = 0;
+    }
+  }
   constexpr float k = 0.7071f;
   const float volume = config::get().volume;
   for (int i = 0; i < n; i++) {

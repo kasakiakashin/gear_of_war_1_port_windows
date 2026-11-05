@@ -15,6 +15,8 @@ struct XmaStream {
   uint32_t channels = 0, rate = 0;
   std::vector<int16_t> pcm;  // PCM descodificado ainda não escrito no anel de saída (intercalado, nativo)
   size_t pcm_pos = 0;
+  // GOW_DEBUG_AUDIO_DROPS: contagens desde o último Clear
+  uint64_t dbg_packets = 0, dbg_samples = 0, dbg_rejected = 0, dbg_open_fail = 0, dbg_starved = 0, dbg_recv_err = 0;
 };
 
 bool xma_decoder_init();  // carrega o FFmpeg (uma vez); false = modo silencioso

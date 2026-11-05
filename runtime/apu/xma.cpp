@@ -6,9 +6,11 @@
 //   * 0x606 CurrentContextIndex (contexto em processamento; o jogo compara-o ^0x200 com os seus ids);
 //   * 0x650..0x659 Kick, 0x690..0x699 Lock, 0x6A0..0x6A9 Clear: máscaras de 32 contextos por registrador.
 // Aqui o MMIO é RAM simples: uma thread do host varre os registradores de comando a cada ~1 ms, troca-os
-// atomicamente por 0 e aplica-os (Lock → Clear → Kick). Cada Kick faz uma passagem de descodificação no contexto,
-// como o Work() do Xenia: descodifica pacotes de 2048 bytes (xma_decoder.cpp) e enche o anel de saída com PCM de
-// 16 bits BE intercalado, em blocos de 256 bytes.
+// atomicamente por 0 e aplica-os (Lock → Clear → Kick). Um Kick ativa o contexto até ao Lock seguinte (como Enable/Disable
+// do Xenia): enquanto ativo, cada volta (~1 ms) faz uma passagem de descodificação, como o Work() do Xenia, e o anel
+// de saída volta a encher-se assim que o jogo o lê e o marca outra vez como válido, sem novo Kick. Com uma passagem por
+// Kick, os sons curtos (1 Kick, anel cheio) eram libertados com metade do PCM por tocar. A passagem descodifica pacotes
+// de 2048 bytes (xma_decoder.cpp) e enche o anel de saída com PCM de 16 bits BE intercalado, em blocos de 256 bytes.
 //
 // XMA_CONTEXT_DATA (16 palavras BE; campos de bits a partir do bit menos significativo de cada palavra):
 //   0: in0_packet_count:12 loop_count:8 in0_valid:1 in1_valid:1 out_block_count:5 out_write_offset:5
@@ -49,9 +51,25 @@ bool g_used[kCtxCount] = {};
 std::atomic<bool> g_enabled[kCtxCount];
 std::atomic<uint64_t> g_kicks{0};
 bool g_trace = false;
+bool g_debug_drops = false;  // GOW_DEBUG_AUDIO_DROPS=1
 const char* g_dump_dir = nullptr;  // GOW_XMA_DUMP_DIR: PCM de cada contexto, para análise
 uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0, g_stat_trimmed = 0;
 apu::XmaStream g_streams[kCtxCount];  // estado do descodificador por contexto (host)
+uint64_t g_dbg_out_invalid[kCtxCount] = {}, g_dbg_kicks[kCtxCount] = {};
+
+// Resumo de um contexto quando o jogo o limpa ou liberta: quanto entrou, quanto saiu e o que ficou por tocar.
+void debug_summary(uint32_t i, const char* why) {
+  apu::XmaStream& s = g_streams[i];
+  if (!g_debug_drops || (!s.dbg_packets && !g_dbg_kicks[i])) return;
+  std::fprintf(stderr, "[audio-drops] ctx %u %s: %u canais %u Hz, %llu kicks, %llu pacotes, %llu amostras, %llu recusados, %llu erros de "
+                       "receive, %llu falhas de open, %llu esperas, %llu passagens sem saída válida, %zu amostras por escrever descartadas\n",
+               i, why, s.channels, s.rate, (unsigned long long)g_dbg_kicks[i], (unsigned long long)s.dbg_packets,
+               (unsigned long long)s.dbg_samples, (unsigned long long)s.dbg_rejected, (unsigned long long)s.dbg_recv_err,
+               (unsigned long long)s.dbg_open_fail, (unsigned long long)s.dbg_starved, (unsigned long long)g_dbg_out_invalid[i],
+               s.pcm.size() - s.pcm_pos);
+  s.dbg_packets = s.dbg_samples = s.dbg_rejected = s.dbg_recv_err = s.dbg_open_fail = s.dbg_starved = 0;
+  g_dbg_out_invalid[i] = g_dbg_kicks[i] = 0;
+}
 
 volatile LONG* reg(uint32_t i) { return reinterpret_cast<volatile LONG*>(gm::base() + gm::kXmaRegBase + 4 * i); }
 uint8_t* phys_ptr(uint32_t phys) { return gm::base() + 0xA0000000u + (phys & 0x1FFFFFFFu); }
@@ -101,8 +119,14 @@ uint32_t frames_from(const uint8_t* pkt, uint32_t from_bit) {
 
 // Uma passagem de descodificação (Work do Xenia).
 void decode(uint32_t i, Ctx& c) {
-  if (!c.get(1, 31, 1)) return;  // saída inválida
+  if (!c.get(1, 31, 1)) {  // saída inválida
+    g_dbg_out_invalid[i]++;
+    return;
+  }
   apu::XmaStream& st = g_streams[i];
+  // Sem mais entrada: o resto do último quadro (menos de um bloco) sai completado com silêncio, em vez de se perder.
+  if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.pcm.size() > st.pcm_pos && st.pcm.size() - st.pcm_pos < kBlockBytes / 2)
+    st.pcm.resize(st.pcm_pos + kBlockBytes / 2, 0);
   if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.pcm.size() - st.pcm_pos < kBlockBytes / 2) {
     c.set(1, 31, 1, 0);
     return;
@@ -142,6 +166,7 @@ void decode(uint32_t i, Ctx& c) {
     if (!c.get(0, 20 + cur, 1)) {
       if (!c.get(0, 20 + (cur ^ 1), 1)) {  // à espera que o jogo entregue mais pacotes
         g_stat_starved++;
+        s.dbg_starved++;
         break;
       }
       swap_input(c);
@@ -199,8 +224,9 @@ void decode(uint32_t i, Ctx& c) {
       g_stat_jumps++;
       continue;
     }
-    if (next >= packet_count) swap_input(c);
-    else c.set(2, 0, 26, next * kPacketBits + 32);
+    // Fim do buffer: só se marca como consumido (swap_input, no ramo "falta PCM") depois de o PCM deste pacote chegar ao anel.
+    // Marcá-lo logo, com o anel cheio e o resto na fila do host, fazia o XAudio dar a voz por acabada e libertá-la a meio.
+    c.set(2, 0, 26, next >= packet_count ? packet_count * kPacketBits : next * kPacketBits + 32);
   }
   c.set(0, 27, 5, wr);
   if (wrote && wr == rd) c.set(1, 31, 1, 0);  // anel cheio
@@ -217,6 +243,7 @@ void apply(uint32_t base_reg, int kind) {
       if (kind == 0) {
         g_enabled[i] = false;  // Lock
       } else if (kind == 1) {  // Clear
+        debug_summary(i, "clear");
         Ctx c;
         load(i, c);
         c.set(0, 20, 2, 0);
@@ -228,6 +255,7 @@ void apply(uint32_t base_reg, int kind) {
       } else {
         g_enabled[i] = true;  // Kick
         g_kicks.fetch_add(1, std::memory_order_relaxed);
+        g_dbg_kicks[i]++;
       }
       if (g_trace) std::fprintf(stderr, "[xma] %s contexto %u\n", kind == 0 ? "lock" : kind == 1 ? "clear" : "kick", i);
     }
@@ -243,7 +271,7 @@ DWORD WINAPI xma_thread(LPVOID) {
       apply(kRegClear, 1);
       apply(kRegKick, 2);
       for (uint32_t i = 0; i < kCtxCount; i++) {
-        if (!g_enabled[i].exchange(false)) continue;
+        if (!g_enabled[i].load(std::memory_order_relaxed)) continue;
         Ctx c;
         load(i, c);
         decode(i, c);
@@ -267,6 +295,7 @@ void xma_stats(uint64_t& packets, uint64_t& skips, uint64_t& starved, uint64_t& 
 void xma_init() {
   apu::xma_decoder_init();
   g_trace = std::getenv("GOW_TRACE_XMA") != nullptr;
+  g_debug_drops = std::getenv("GOW_DEBUG_AUDIO_DROPS") != nullptr;
   g_dump_dir = std::getenv("GOW_XMA_DUMP_DIR");
   g_array_va = gm::physical_alloc(kCtxSize * kCtxCount, gm::kPageReadWrite, 0, 0, 0x1000);
   g_array_phys = gm::physical_address(g_array_va);
@@ -305,6 +334,7 @@ XBOX_IMPORT(XMAReleaseContext) {
   uint32_t c = arg(ctx, 0);
   if (c >= g_array_va && c < g_array_va + kCtxSize * kCtxCount) {
     uint32_t i = (c - g_array_va) / kCtxSize;
+    debug_summary(i, "libertado");
     g_used[i] = false;
     g_enabled[i] = false;
   }

@@ -125,7 +125,12 @@ int16_t to_s16(float v) {
 void receive(XmaStream& s) {
   Ffmpeg& f = g_ff;
   auto* fr = static_cast<uint8_t*>(f.frame);
-  while (f.receive_frame(s.codec, f.frame) >= 0) {
+  for (;;) {
+    const int rr = f.receive_frame(s.codec, f.frame);
+    if (rr < 0) {
+      if (rr != -11 && rr != -541478725) s.dbg_recv_err++;  // EAGAIN / AVERROR_EOF
+      break;
+    }
     int n = *reinterpret_cast<int*>(fr + 112), fmt = *reinterpret_cast<int*>(fr + 116);
     float* ch[2];
     std::memcpy(ch, fr, sizeof(ch));
@@ -138,6 +143,7 @@ void receive(XmaStream& s) {
       }
     }
     g_frames.fetch_add((uint64_t)n / kFrameSamples, std::memory_order_relaxed);
+    s.dbg_samples += (uint64_t)n;
     f.frame_unref(f.frame);
   }
 }
@@ -200,6 +206,7 @@ void xma_decode_packet(XmaStream& s, const uint8_t* packet, uint32_t channels, u
     s.channels = channels;
     s.rate = rate;
     if (!s.codec) {
+      s.dbg_open_fail++;
       std::fprintf(stderr, "[xma] avcodec_open2 falhou (%u canais, %u Hz)\n", channels, rate);
       return;
     }
@@ -210,8 +217,12 @@ void xma_decode_packet(XmaStream& s, const uint8_t* packet, uint32_t channels, u
   std::memcpy(data, packet, 2048);
   int r = f.send_packet(s.codec, f.packet);
   f.packet_unref(f.packet);
+  s.dbg_packets++;
   if (r < 0) {  // pacote inválido: ignora
     g_rejected.fetch_add(1, std::memory_order_relaxed);
+    if (s.dbg_rejected++ < 4 && std::getenv("GOW_DEBUG_AUDIO_DROPS"))
+      std::fprintf(stderr, "[audio-drops] send_packet %d (%u canais, %u Hz) cabeçalho %02X %02X %02X %02X\n", r, channels, rate,
+                   packet[0], packet[1], packet[2], packet[3]);
     return;
   }
   receive(s);
