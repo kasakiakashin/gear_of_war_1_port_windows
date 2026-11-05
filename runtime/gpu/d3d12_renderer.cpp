@@ -69,7 +69,7 @@ enum : uint32_t {
   kVgtIndxOffset = 0x2102, kVgtMultiPrimIbResetIndx = 0x2103, kRbColorMask = 0x2104, kRbBlendRed = 0x2105,
   kRbStencilRefMask = 0x210D, kRbAlphaRef = 0x210E, kPaClVportXscale = 0x210F, kSqProgramCntl = 0x2180,
   kSqContextMisc = 0x2181, kRbDepthControl = 0x2200, kRbBlendControl0 = 0x2201, kRbColorControl = 0x2202,
-  kPaSuPolyOffsetFrontScale = 0x2380, kPaClClipCntl = 0x2204, kPaSuScModeCntl = 0x2205, kPaClVteCntl = 0x2206, kRbModeControl = 0x2208, kRbBlendControl1 = 0x2209,
+  kPaSuPolyOffsetFrontScale = 0x2380, kPaClClipCntl = 0x2204, kPaSuScModeCntl = 0x2205, kPaClVteCntl = 0x2206, kPaSuVtxCntl = 0x2302, kRbModeControl = 0x2208, kRbBlendControl1 = 0x2209,
   kSqVsConst = 0x2307, kSqPsConst = 0x2308, kRbCopyControl = 0x2318, kRbCopyDestBase = 0x2319,
   kRbCopyDestPitch = 0x231A, kRbCopyDestInfo = 0x231B, kRbDepthClear = 0x231D, kRbColorClear = 0x231E,
   kConstAlu = 0x4000, kConstFetch = 0x4800, kConstBool = 0x4900, kConstLoop = 0x4908,
@@ -2437,6 +2437,17 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   uint32_t prim = initiator & 0x3F, source = (initiator >> 6) & 3, num = initiator >> 16;
   static const bool no_clear_hack = std::getenv("GOW_NO_DRAW_CLEARS") != nullptr;
   TilePass tp = g_tiles.enabled ? tile_pass() : kNotTiled;
+  // GOW_TRACE_TILES=N: no frame N, tesouras e pitches dos desenhos de cada tile (para ver o que a fusão salta).
+  static const long trace_tiles = std::getenv("GOW_TRACE_TILES") ? std::atol(std::getenv("GOW_TRACE_TILES")) : -1;
+  if (tp != kNotTiled && (long)g.frame == trace_tiles) {
+    static std::map<std::tuple<int, uint32_t, uint32_t, uint32_t>, uint32_t> seen;
+    const uint32_t tl = reg(kPaScWindowScissorTl), br = reg(kPaScWindowScissorBr), pitch = reg(kRbSurfaceInfo) & 0x3FFF;
+    if (seen[{(int)tp, tl & 0x3FFF3FFF, br & 0x3FFF3FFF, pitch}]++ == 0)
+      std::fprintf(stderr, "[tiles] frame %llu %s tesoura (%u,%u)-(%u,%u) pitch %u janela y %d%s\n", (unsigned long long)g.frame,
+                   tp == kFirstTile ? "tile 1" : "tile 2", tl & 0x3FFF, (tl >> 16) & 0x3FFF, br & 0x3FFF, (br >> 16) & 0x3FFF, pitch,
+                   (int32_t)((reg(kPaScWindowOffset) >> 16) << 17) >> 17,
+                   tp == kFirstTile && g_tiles.boundary && ((br >> 16) & 0x3FFF) == g_tiles.boundary ? " (estendida)" : "");
+  }
   if (tp == kLaterTile && skip_later_tile(true)) return;
   if (mode == 5 && prim == 8 && source == 2 && !no_clear_hack && try_clear(num, tp == kFirstTile)) return;
   bool i32 = (initiator >> 11) & 1;
@@ -2599,7 +2610,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     sys.rt[2] = (float)((int32_t)(wo << 17) >> 17);
     sys.rt[3] = (float)((int32_t)((wo >> 16) << 17) >> 17);
   }
-  sys.flags[0] = reg(kPaClVteCntl);
+  // Bit 31 (livre no VTE_CNTL): PA_SU_VTX_CNTL.pix_center = 0, centros dos píxeis em coordenadas inteiras (D3D9; o jogo usa 0x4).
+  sys.flags[0] = reg(kPaClVteCntl) | ((reg(kPaSuVtxCntl) & 1) ? 0u : 0x80000000u);
   uint32_t colorcontrol = reg(kRbColorControl);
   sys.flags[1] = colorcontrol & 0xF;
   uint32_t pc = reg(kSqProgramCntl);

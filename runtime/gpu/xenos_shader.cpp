@@ -38,7 +38,7 @@ cbuffer XeSystem : register(b3) {
   float4 xe_vp_scale;
   float4 xe_vp_offset;
   float4 xe_rt;          // x = 2/largura, y = 2/altura, zw = deslocamento da janela
-  uint4 xe_flags;        // x = PA_CL_VTE_CNTL, y = alpha test (func | enable << 3), z = param_gen (reg | 0x100), w = VGT_INDX_OFFSET
+  uint4 xe_flags;        // x = PA_CL_VTE_CNTL | pix_center D3D << 31, y = alpha test (func | enable << 3), z = param_gen (reg | 0x100), w = VGT_INDX_OFFSET
   float4 xe_alpha_ref;
   float4 xe_tex_size[32];
   float4 xe_rt_scale;    // 2^color_exp_bias por RT
@@ -829,7 +829,10 @@ VSOut main(uint vid : SV_VertexID) {
   // triângulos que atravessam o plano próximo no mesmo sítio que o Xenos. Dividir e voltar a multiplicar com saturate(z)
   // deformava-os (câmara encostada a paredes, volumes de sombra atrás da câmara) e perdia os vértices com w = 0.
   float2 sxy = float2((vte & 1u) ? xe_vp_scale.x : 1.0, (vte & 4u) ? xe_vp_scale.y : 1.0);
-  float2 oxy = float2((vte & 2u) ? xe_vp_offset.x : 0.0, (vte & 8u) ? xe_vp_offset.y : 0.0) + xe_rt.zw;
+  // Com o centro dos píxeis em inteiros (pix_center = 0, bit 31 de xe_flags.x) o Xenos desloca tudo +0,5 píxel face ao D3D12 (como o
+  // Xenia): sem isto cada desenho, e cada passe de ecrã inteiro que lê a cópia do anterior, ficava meio píxel acima e à esquerda.
+  float2 oxy = float2((vte & 2u) ? xe_vp_offset.x : 0.0, (vte & 8u) ? xe_vp_offset.y : 0.0) + xe_rt.zw +
+               ((vte & 0x80000000u) ? 0.5 : 0.0);
   float2 sp = q.xy * sxy + oxy * w;
   float z = q.z * ((vte & 0x10u) ? xe_vp_scale.z : 1.0) + ((vte & 0x20u) ? xe_vp_offset.z : 0.0) * w;
   o.pos = float4(sp.x * xe_rt.x - w, w - sp.y * xe_rt.y, z, w);
@@ -851,7 +854,7 @@ VSOut main(uint vid : SV_VertexID) {
       h += "  float4 oDepth = float4(i.pos.z, 0, 0, 0);\n";
       h += machine(body);
       h += "  [unroll] for (uint k = 0; k < 16; k++) r[k] = i.o[k];\n";
-      h += "  if (xe_flags.z & 0x100u) r[xe_flags.z & 63u] = float4(i.pos.xy * xe_res.xy, 0.0, 0.0);\n";
+      h += "  if (xe_flags.z & 0x100u) r[xe_flags.z & 63u] = float4(floor(i.pos.xy) * xe_res.xy, 0.0, 0.0);\n";
       h += state_loop(body);
       h += R"(  if (xe_flags.y & 8u) {
     uint f = xe_flags.y & 7u; float a = oC[0].w, ref = xe_alpha_ref.x;
