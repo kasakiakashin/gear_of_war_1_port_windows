@@ -22,7 +22,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "0.9.0"
+DEFAULT_VERSION = "0.9.1"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
 SHADER_PACK = "prebuilt_shaders.bin"  # exceções ao .bin de FORBIDDEN
