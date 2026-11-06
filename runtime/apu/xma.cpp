@@ -5,8 +5,9 @@
 //   * 0x600 ContextArrayAddress = endereço físico da tabela de 320 contextos de 64 bytes (XMA_CONTEXT_DATA);
 //   * 0x606 CurrentContextIndex (contexto em processamento; o jogo compara-o ^0x200 com os seus ids);
 //   * 0x650..0x659 Kick, 0x690..0x699 Lock, 0x6A0..0x6A9 Clear: máscaras de 32 contextos por registrador.
-// Aqui o MMIO é RAM simples: uma thread do host varre os registradores de comando a cada ~1 ms, troca-os
-// atomicamente por 0 e aplica-os (Lock → Clear → Kick). Um Kick ativa o contexto até ao Lock seguinte (como Enable/Disable
+// O jogo escreve Kick/Lock/Clear com stwbrx; o ppc_st32r desvia essas escritas para xma_mmio_store, que as aplica antes de o
+// jogo continuar (um Clear aplicado 1 ms depois apagava a configuração que o jogo já tinha escrito para a voz nova). O resto
+// do bloco é RAM simples, e a thread do XMA ainda varre os registos de comando a cada ~1 ms. Um Kick ativa o contexto até ao Lock seguinte (como Enable/Disable
 // do Xenia): enquanto ativo, cada volta (~1 ms) faz uma passagem de descodificação, como o Work() do Xenia, e o anel
 // de saída volta a encher-se assim que o jogo o lê e o marca outra vez como válido, sem novo Kick. Com uma passagem por
 // Kick, os sons curtos (1 Kick, anel cheio) eram libertados com metade do PCM por tocar. A passagem descodifica pacotes
@@ -27,7 +28,9 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
+#include <vector>
 #include <mutex>
 #include <thread>
 #include <chrono>
@@ -53,12 +56,45 @@ std::atomic<uint64_t> g_kicks{0};
 bool g_trace = false;
 bool g_debug_drops = false;  // GOW_DEBUG_AUDIO_DROPS=1
 const char* g_dump_dir = nullptr;  // GOW_XMA_DUMP_DIR: PCM de cada contexto, para análise
-uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0, g_stat_trimmed = 0;
+uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0, g_stat_drains = 0;
 apu::XmaStream g_streams[kCtxCount];  // estado do descodificador por contexto (host)
 uint64_t g_dbg_out_invalid[kCtxCount] = {}, g_dbg_kicks[kCtxCount] = {}, g_dbg_full_kept[kCtxCount] = {};
 // Anel de saída deixado cheio pela última passagem (read == write também é "vazio"): enquanto o jogo não mexer no read offset,
 // não há espaço, mesmo que volte a marcar a saída como válida.
 bool g_ring_full[kCtxCount] = {};
+bool g_wrote_since_empty[kCtxCount] = {};
+uint64_t g_stat_voice_empty = 0;
+
+// GOW_XMA_DUMP_DIR: por instância de voz (contexto entre Create/Clear), o PCM escrito no anel do jogo (int16 nativo) e um
+// registo de eventos com a posição, em amostras escritas, onde começa o PCM do evento (pacote, loop, troca de buffer, flush).
+uint32_t g_dump_seq[kCtxCount] = {};
+uint64_t g_dump_written[kCtxCount] = {};
+FILE* g_dump_pcm[kCtxCount] = {};
+FILE* g_dump_txt[kCtxCount] = {};
+uint32_t g_dump_next_seq = 0;
+void dump_open(uint32_t i) {
+  if (!g_dump_dir) return;
+  if (g_dump_pcm[i]) std::fclose(g_dump_pcm[i]);
+  if (g_dump_txt[i]) std::fclose(g_dump_txt[i]);
+  g_dump_seq[i] = g_dump_next_seq++;
+  g_dump_written[i] = 0;
+  char name[260];
+  std::snprintf(name, sizeof name, "%s/v%05u_c%03u.pcm", g_dump_dir, g_dump_seq[i], i);
+  g_dump_pcm[i] = std::fopen(name, "wb");
+  std::snprintf(name, sizeof name, "%s/v%05u_c%03u.txt", g_dump_dir, g_dump_seq[i], i);
+  g_dump_txt[i] = std::fopen(name, "w");
+  if (g_dump_txt[i]) std::fprintf(g_dump_txt[i], "0 time %llu 0 0\n", (unsigned long long)GetTickCount64());
+}
+void dump_event(uint32_t i, const char* what, uint32_t a, uint32_t b, uint32_t c) {
+  if (!g_dump_txt[i]) return;
+  const apu::XmaStream& s = g_streams[i];
+  std::fprintf(g_dump_txt[i], "%llu %s %u %u %u\n", (unsigned long long)(g_dump_written[i] + (s.pcm.size() - s.pcm_pos)), what, a, b, c);
+}
+void dump_pcm(uint32_t i, const int16_t* p, size_t n) {
+  if (!g_dump_pcm[i]) return;
+  std::fwrite(p, 2, n, g_dump_pcm[i]);
+  g_dump_written[i] += n;
+}
 
 // Resumo de um contexto quando o jogo o limpa ou liberta: quanto entrou, quanto saiu e o que ficou por tocar.
 void debug_summary(uint32_t i, const char* why) {
@@ -129,36 +165,59 @@ void swap_input(Ctx& c) {
   c.set(2, 0, 26, 0);
 }
 
-// Quadros que começam em from_bit ou depois (bits a contar do início do pacote) e acabam dentro do pacote. Cada quadro começa
-// com o seu comprimento em 15 bits; first_frame_offset diz onde está o 1º depois do cabeçalho de 32 bits.
-uint32_t read_bits15(const uint8_t* p, uint32_t bit) {
-  uint32_t v = 0;
-  for (uint32_t i = 0; i < 15; i++, bit++) v = v << 1 | ((p[bit >> 3] >> (7 - (bit & 7))) & 1);
-  return v;
-}
-
-uint32_t frames_from(const uint8_t* pkt, uint32_t from_bit) {
-  uint32_t bit = 32 + (((pkt[0] & 3u) << 13) | (pkt[1] << 5) | (pkt[2] >> 3)), n = 0;
-  while (bit + 15 <= kPacketBits) {
-    const uint32_t len = read_bits15(pkt, bit);
-    if (len == 0x7FFF || len < 15 || bit + len > kPacketBits) break;
-    if (bit >= from_bit) n++;
-    bit += len;
+// Pacote só com os bits [from, to) (from = início de um quadro ou 32; to = fim de um quadro ou do pacote).
+// Devolve o próprio pacote quando não há nada a retirar, out quando foi reescrito, nullptr quando não sobra nada.
+const uint8_t* packet_part(const uint8_t* pkt, uint32_t from, uint32_t to, uint8_t* out) {
+  const uint32_t ffo = ((pkt[0] & 3u) << 13) | (pkt[1] << 5) | (pkt[2] >> 3), first = 32 + ffo, frames = pkt[0] >> 2;
+  if (from < 32) from = 32;
+  if (to > kPacketBits) to = kPacketBits;
+  if (from <= 32 && to >= kPacketBits) return pkt;
+  if (to <= from) return nullptr;
+  auto bit_at = [&](uint32_t b) { return (pkt[b >> 3] >> (7 - (b & 7))) & 1u; };
+  // Quadros que começam em [max(from, first), to).
+  uint32_t kept = 0, at = first;
+  for (uint32_t k = 0; k < frames && at + 15 <= kPacketBits; k++) {
+    if (at >= to) break;
+    if (at >= from) kept++;
+    uint32_t len = 0;
+    for (uint32_t j = 0; j < 15; j++) len = len << 1 | bit_at(at + j);
+    if (len < 15 || len == 0x7FFF) break;
+    at += len;
   }
-  return n;
+  std::memset(out, 0, kPacketBytes);
+  out[3] = pkt[3];
+  if (from <= 32) {  // mantém o início (resto do quadro anterior + quadros) e corta a partir de to
+    std::memcpy(out, pkt, (to + 7) / 8);
+    if (to & 7) out[to >> 3] &= (uint8_t)(0xFF00 >> (to & 7));
+    out[0] = (uint8_t)((kept << 2) | (pkt[0] & 3));
+    return out;
+  }
+  // Começa a meio: os quadros a partir de from passam para o bit 32 (first_frame_offset 0).
+  out[0] = (uint8_t)(kept << 2);
+  out[1] = 0;
+  out[2] = 0;
+  for (uint32_t b = from, w = 32; b < to; b++, w++)
+    if (bit_at(b)) out[w >> 3] |= (uint8_t)(0x80 >> (w & 7));
+  return out;
 }
 
-// Uma passagem de descodificação (Work do Xenia).
+// Uma passagem de descodificação (Work do Xenia): enche o anel de saída a partir do buffer de entrada atual.
 void decode(uint32_t i, Ctx& c) {
   if (!c.get(1, 31, 1)) {  // saída inválida
     g_dbg_out_invalid[i]++;
     return;
   }
   apu::XmaStream& st = g_streams[i];
-  // Sem mais entrada: o resto do último quadro (menos de um bloco) sai completado com silêncio, em vez de se perder.
-  if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.pcm.size() > st.pcm_pos && st.pcm.size() - st.pcm_pos < kBlockBytes / 2)
-    st.pcm.resize(st.pcm_pos + kBlockBytes / 2, 0);
-  if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.pcm.size() - st.pcm_pos < kBlockBytes / 2) {
+  constexpr size_t kBlockSamples = kBlockBytes / 2;
+  // Sem entrada (o jogo tirou-a): o que o descodificador ainda guarda sai, e o resto do último quadro (menos de um bloco) é
+  // completado com silêncio, em vez de se perder.
+  if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.fed) {
+    apu::xma_drain(st);
+    g_stat_drains++;
+  }
+  if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.pcm.size() > st.pcm_pos && (st.pcm.size() - st.pcm_pos) % kBlockSamples)
+    st.pcm.resize(st.pcm.size() + kBlockSamples - (st.pcm.size() - st.pcm_pos) % kBlockSamples, 0);
+  if (!c.get(0, 20, 1) && !c.get(0, 21, 1) && st.pcm.size() - st.pcm_pos < kBlockSamples) {
     c.set(1, 31, 1, 0);
     return;
   }
@@ -175,12 +234,17 @@ void decode(uint32_t i, Ctx& c) {
     return;
   }
   g_ring_full[i] = false;
+  // Anel vazio com a voz ainda a tocar: o XAudio leu tudo antes de a passagem seguinte o voltar a encher (um corte audível).
+  if (free_blocks == block_count && g_wrote_since_empty[i] && (c.get(0, 20, 1) || c.get(0, 21, 1) || st.pcm.size() > st.pcm_pos)) {
+    g_wrote_since_empty[i] = false;
+    g_stat_voice_empty++;
+    dump_event(i, "empty", rd, wr, 0);
+  }
   static const uint32_t kRates[4] = {24000, 32000, 44100, 48000};
   const uint32_t rate = kRates[c.get(1, 27, 2)];
   uint8_t* out = phys_ptr(c.d[7]);
   apu::XmaStream& s = g_streams[i];
   bool wrote = false;
-  constexpr size_t kBlockSamples = kBlockBytes / 2;
   for (int guard = 0; free_blocks > 0 && guard < 8192; guard++) {
     // PCM já descodificado → anel de saída, um bloco de 256 bytes de cada vez (int16 BE intercalado).
     if (s.pcm.size() - s.pcm_pos >= kBlockSamples) {
@@ -191,10 +255,12 @@ void decode(uint32_t i, Ctx& c) {
         dst[2 * k] = (uint8_t)(v >> 8);
         dst[2 * k + 1] = (uint8_t)v;
       }
+      dump_pcm(i, src, kBlockSamples);
       s.pcm_pos += kBlockSamples;
       wr = (wr + 1) % block_count;
       free_blocks--;
       wrote = true;
+      g_wrote_since_empty[i] = true;
       continue;
     }
     // Falta PCM: descodifica o pacote seguinte do buffer de entrada atual.
@@ -211,34 +277,38 @@ void decode(uint32_t i, Ctx& c) {
     uint32_t packet_count = cur ? c.get(1, 0, 12) : c.get(0, 0, 12);
     uint32_t packet = c.get(2, 0, 26) / kPacketBits;
     if (packet >= packet_count) {
+      // Fim da entrada: o "xma2" do FFmpeg retém sempre 4096 amostras na sua FIFO (alinha fluxos intercalados) e só as entrega
+      // com mais pacotes ou com o fim do fluxo. Sem este EOF o fim de cada som (85-170 ms) perdia-se e sons de menos de 4096
+      // amostras não tocavam. Com o outro buffer válido o fluxo continua e não se esvazia. O resto completa-se com silêncio até
+      // ao bloco, e o buffer só é dado como consumido depois de esse PCM chegar ao anel.
+      if (s.fed && !c.get(0, 20 + (cur ^ 1), 1)) {
+        apu::xma_drain(s);
+        g_stat_drains++;
+        dump_event(i, "drain", 0, 0, 0);
+        if (s.pcm.size() > s.pcm_pos && (s.pcm.size() - s.pcm_pos) % kBlockSamples)
+          s.pcm.resize(s.pcm.size() + kBlockSamples - (s.pcm.size() - s.pcm_pos) % kBlockSamples, 0);
+        continue;
+      }
       swap_input(c);
       continue;
     }
     const uint8_t* pkt = phys_ptr(c.d[5 + cur]) + packet * kPacketBytes;
-    const size_t pcm_before = s.pcm.size(), pos_before = s.pcm_pos;
-    apu::xma_decode_packet(s, pkt, channels, rate);
-    // Loop a meio do pacote: o FFmpeg entrega o pacote inteiro, mas os quadros a partir de loop_end já não fazem parte do
-    // loop (até 0,2 s de outro som a cada volta). Retira-os do PCM.
-    if (const uint32_t lc = c.get(0, 12, 8), le = c.get(4, 0, 26); lc && le > c.get(3, 0, 26) && (packet + 1) * kPacketBits > le && !pkt[3]) {
-      const uint32_t drop = frames_from(pkt, le - packet * kPacketBits);
-      const size_t samples = (size_t)drop * 512 * channels, got = s.pcm_pos == pos_before ? s.pcm.size() - pcm_before : s.pcm.size();
-      if (samples && samples <= got) {
-        s.pcm.resize(s.pcm.size() - samples);
-        g_stat_trimmed += drop;
-      }
-    }
-    if (const char* dd = g_dump_dir) {
-      char name[260];
-      std::snprintf(name, sizeof name, "%s/c%03u.pcm", dd, i);
-      if (FILE* f = std::fopen(name, "ab")) {
-        const size_t from = s.pcm.size() >= pcm_before && s.pcm_pos == pos_before ? pcm_before : 0;
-        std::fwrite(s.pcm.data() + from, 2, s.pcm.size() - from, f);
-        std::fclose(f);
-      }
-      std::snprintf(name, sizeof name, "%s/c%03u.txt", dd, i);
-      if (FILE* f = std::fopen(name, "a")) {
-        std::fprintf(f, "P %u pkt=%u cnt=%u skip=%u ch=%u rate=%u frames=%u first=%u\n", cur, packet, packet_count, pkt[3], channels, rate, pkt[0] >> 2, ((pkt[0] & 3) << 13) | (pkt[1] << 5) | (pkt[2] >> 3));
-        std::fclose(f);
+    dump_event(i, "pkt", cur, packet, pkt[3]);
+    // Loop por hardware (loop_count 255 = infinito): loop_start/loop_end são posições em bits de quadros (loop_end não incluído).
+    static const bool no_loop = std::getenv("GOW_XMA_NOLOOP") != nullptr;
+    const uint32_t loop_count = c.get(0, 12, 8), loop_start = c.get(3, 0, 26), loop_end = c.get(4, 0, 26);
+    const bool loop_here = !no_loop && loop_count && loop_end > loop_start && (packet + 1) * kPacketBits > loop_end;
+    // Ao descodificador só vão os quadros [deslocamento de leitura, loop_end) deste pacote: o pacote de loop_end sem os quadros
+    // de fora do loop e o de loop_start (a meio de um pacote) sem os anteriores. O fluxo continua sem flush, como no hardware.
+    // Antes o pacote ia inteiro e cortava-se o PCM a seguir, mas com a FIFO do FFmpeg o PCM que sai é de 4096 amostras antes:
+    // tirava-se o sítio errado (um clique em cada volta) e os quadros depois de loop_end tocavam na volta seguinte.
+    {
+      const uint32_t from = c.get(2, 0, 26) - packet * kPacketBits;
+      const uint32_t to = loop_here && loop_end >= packet * kPacketBits ? loop_end - packet * kPacketBits : kPacketBits;
+      uint8_t part[kPacketBytes];
+      if (const uint8_t* feed = packet_part(pkt, from, to, part)) {
+        apu::xma_decode_packet(s, feed, channels, rate);
+        s.fed = true;
       }
     }
     // packet_skip (último byte do cabeçalho): pacotes de outros fluxos intercalados até ao seguinte deste contexto.
@@ -246,17 +316,11 @@ void decode(uint32_t i, Ctx& c) {
     const uint32_t skip = pkt[3], next = skip == 0xFF ? packet_count : packet + 1 + skip;
     g_stat_packets++;
     if (skip) g_stat_skips++;
-    // Loop por hardware (loop_count 255 = infinito): os pontos são posições em bits de quadros; aqui a passagem é por
-    // pacote, ao fim do pacote que contém loop_end, porque o descodificador só recebe pacotes inteiros.
-    const uint32_t loop_count = c.get(0, 12, 8), loop_start = c.get(3, 0, 26), loop_end = c.get(4, 0, 26);
-    static const bool no_loop = std::getenv("GOW_XMA_NOLOOP") != nullptr;
-    if (!no_loop && loop_count && loop_end > loop_start && (packet + 1) * kPacketBits > loop_end) {
+    if (loop_here) {
       if (g_trace) std::fprintf(stderr, "[xma] ctx %u loop: count %u bits %u..%u (pacotes %u..%u de %u)\n", i, loop_count, loop_start, loop_end, loop_start / kPacketBits, loop_end / kPacketBits, packet_count);
       if (loop_count != 255) c.set(0, 12, 8, loop_count - 1);
       c.set(2, 0, 26, loop_start);
-      // A partir do 1º quadro de um pacote o fluxo continua limpo: sem flush, a sobreposição do MDCT mantém-se e não há
-      // um buraco a cada volta. Só um início a meio de um pacote é que não é contíguo.
-      if (loop_start % kPacketBits != 32) apu::xma_flush(s);
+      dump_event(i, "loop", loop_start, loop_end, 0);
       g_stat_jumps++;
       continue;
     }
@@ -271,53 +335,60 @@ void decode(uint32_t i, Ctx& c) {
   }
 }
 
-void apply(uint32_t base_reg, int kind) {
-  for (uint32_t g = 0; g < 10; g++) {
-    uint32_t m = (uint32_t)InterlockedExchange(reg(base_reg + g), 0);
-    while (m) {
-      uint32_t bit = (uint32_t)__builtin_ctz(m);
-      m &= m - 1;
-      uint32_t i = g * 32 + bit;
-      if (i >= kCtxCount) continue;
-      if (kind == 0) {
-        g_enabled[i] = false;  // Lock
-      } else if (kind == 1) {  // Clear
-        debug_summary(i, "clear");
-        Ctx c;
-        load(i, c);
-        c.set(0, 20, 2, 0);
-        c.set(1, 31, 1, 0);
-        c.set(9, 0, 5, 0);
-        c.set(0, 27, 5, 0);
-        store(i, c);
-        apu::xma_reset(g_streams[i]);
-        g_ring_full[i] = false;
-      } else {
-        g_enabled[i] = true;  // Kick
-        g_kicks.fetch_add(1, std::memory_order_relaxed);
-        g_dbg_kicks[i]++;
-      }
-      if (g_trace) std::fprintf(stderr, "[xma] %s contexto %u\n", kind == 0 ? "lock" : kind == 1 ? "clear" : "kick", i);
+
+void work(uint32_t i) {
+  Ctx c;
+  load(i, c);
+  const Ctx before = c;
+  decode(i, c);
+  store_changes(i, before, c);
+}
+
+// kind: 0 = Lock, 1 = Clear, 2 = Kick; m = máscara do registo g (32 contextos).
+void apply_mask(uint32_t g, uint32_t m, int kind) {
+  while (m) {
+    uint32_t bit = (uint32_t)__builtin_ctz(m);
+    m &= m - 1;
+    uint32_t i = g * 32 + bit;
+    if (i >= kCtxCount) continue;
+    if (kind == 0) {
+      g_enabled[i] = false;  // Lock
+    } else if (kind == 1) {  // Clear
+      debug_summary(i, "clear");
+      Ctx c;
+      load(i, c);
+      c.set(0, 20, 2, 0);
+      c.set(1, 31, 1, 0);
+      c.set(9, 0, 5, 0);
+      c.set(0, 27, 5, 0);
+      store(i, c);
+      apu::xma_reset(g_streams[i]);
+      g_ring_full[i] = false;
+      g_wrote_since_empty[i] = false;
+      dump_open(i);
+    } else {  // Kick
+      g_enabled[i] = true;
+      g_kicks.fetch_add(1, std::memory_order_relaxed);
+      g_dbg_kicks[i]++;
     }
+    if (g_trace) std::fprintf(stderr, "[xma] %s contexto %u\n", kind == 0 ? "lock" : kind == 1 ? "clear" : "kick", i);
   }
 }
 
-DWORD WINAPI xma_thread(LPVOID) {
+void apply(uint32_t base_reg, int kind) {
+  for (uint32_t g = 0; g < 10; g++) apply_mask(g, (uint32_t)InterlockedExchange(reg(base_reg + g), 0), kind);
+}
 
+DWORD WINAPI xma_thread(LPVOID) {
   for (;;) {
     {
       std::lock_guard<std::mutex> lock(g_mu);
+      // Comandos que não passaram pelo gancho do stwbrx (xma_mmio_store).
       apply(kRegLock, 0);
       apply(kRegClear, 1);
       apply(kRegKick, 2);
-      for (uint32_t i = 0; i < kCtxCount; i++) {
-        if (!g_enabled[i].load(std::memory_order_relaxed)) continue;
-        Ctx c;
-        load(i, c);
-        const Ctx before = c;
-        decode(i, c);
-        store_changes(i, before, c);
-      }
+      for (uint32_t i = 0; i < kCtxCount; i++)
+        if (g_enabled[i].load(std::memory_order_relaxed)) work(i);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
@@ -330,10 +401,38 @@ namespace apu {
 void xma_stats(uint64_t& packets, uint64_t& skips, uint64_t& starved, uint64_t& loops) {
   std::lock_guard<std::mutex> lock(g_mu);
   packets = g_stat_packets, skips = g_stat_skips, starved = g_stat_starved, loops = g_stat_jumps;
+  std::fprintf(stderr, "[xma] %llu vozes com o anel de saída vazio a meio\n", (unsigned long long)g_stat_voice_empty);
+  if (g_debug_drops)
+    for (uint32_t i = 0; i < kCtxCount; i++) {
+      if (!g_used[i]) continue;
+      uint32_t d[16];
+      for (int w = 0; w < 16; w++) d[w] = ppc_ld32(gm::base(), g_array_va + i * kCtxSize + 4 * w);
+      const apu::XmaStream& s = g_streams[i];
+      std::fprintf(stderr, "[audio-drops] estado ctx %u: in %u/%u atual %u off %u (pkt %u de %u/%u) out_valid %u anel r%u w%u/%u loop %u %u..%u st%u %s pend %zu fed %u exh %u full %u kicks %llu w1 %08X w9 %08X\n", i,
+                   (d[0] >> 20) & 1, (d[0] >> 21) & 1, d[4] >> 31, d[2] & 0x3FFFFFF, (d[2] & 0x3FFFFFF) / kPacketBits, d[0] & 0xFFF, d[1] & 0xFFF,
+                   d[1] >> 31, d[9] & 31, (d[0] >> 27) & 31, (d[0] >> 22) & 31, (d[0] >> 12) & 0xFF, d[3] & 0x3FFFFFF, d[4] & 0x3FFFFFF,
+                   (d[1] >> 29) & 1, g_enabled[i] ? "ativo" : "trancado", s.pcm.size() - s.pcm_pos, s.fed, 0u, g_ring_full[i],
+                   (unsigned long long)g_dbg_kicks[i], d[1], d[9]);
+    }
   if (g_debug_drops)
     std::fprintf(stderr, "[audio-drops] %llu palavras de contexto mudadas pelo jogo durante uma passagem (preservadas)\n",
                  (unsigned long long)g_dbg_conflicts.load());
-  if (g_trace) std::fprintf(stderr, "[xma] %llu quadros cortados no fim de loops\n", (unsigned long long)g_stat_trimmed);
+}
+
+// Escrita stwbrx no bloco MMIO do XMA (gancho do ppc_st32r). Kick/Lock/Clear aplicam-se já, com o contexto atualizado
+// antes de o jogo continuar; os outros registos são RAM.
+void xma_mmio_store(uint32_t ea, uint32_t v) {
+  const uint32_t r = (ea - gm::kXmaRegBase) / 4;
+  if ((ea & 3) == 0 && g_array_va) {
+    const int kind = r >= kRegLock && r < kRegLock + 10 ? 0 : r >= kRegClear && r < kRegClear + 10 ? 1 : r >= kRegKick && r < kRegKick + 10 ? 2 : -1;
+    if (kind >= 0) {
+      const uint32_t base = kind == 0 ? kRegLock : kind == 1 ? kRegClear : kRegKick;
+      std::lock_guard<std::mutex> lock(g_mu);
+      apply_mask(r - base, v, kind);
+      return;
+    }
+  }
+  std::memcpy(PPC_HOST(gm::base(), ea), &v, 4);
 }
 
 void xma_init() {
@@ -363,9 +462,16 @@ XBOX_IMPORT(XMACreateContext) {
   for (uint32_t i = 0; i < kCtxCount && g_array_va; i++) {
     if (g_used[i]) continue;
     g_used[i] = true;
+    if (g_debug_drops) {
+      uint32_t n = 0;
+      for (uint32_t k = 0; k < kCtxCount; k++) n += g_used[k];
+      std::fprintf(stderr, "[audio-drops] t=%llu cria ctx %u (%u em uso)\n", (unsigned long long)GetTickCount64(), i, n);
+    }
     g_enabled[i] = false;
     apu::xma_reset(g_streams[i]);
     g_ring_full[i] = false;
+    dump_open(i);
+    g_wrote_since_empty[i] = false;
     for (uint32_t o = 0; o < kCtxSize; o += 4) ppc_st32(mem_base, ctx_va(i) + o, 0);
     out32(mem_base, arg(ctx, 0), ctx_va(i));
     return ret_status(ctx, kStatusSuccess);

@@ -10,6 +10,7 @@ namespace apu {
 // descodificador. Chamar depois de gm::init() e antes do código convidado.
 void xma_stats(uint64_t& packets, uint64_t& skips, uint64_t& starved, uint64_t& loops);
 void xma_init();
+void xma_mmio_store(uint32_t ea, uint32_t v);  // stwbrx em 0x7FEA0000 (ppc_mmio_st32r)
 
 // Saída de som do host (audio_out.cpp, WASAPI). output_init arranca o dispositivo (GOW_AUDIO=0 desliga).
 void output_init();

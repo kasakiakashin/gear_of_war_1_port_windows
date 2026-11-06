@@ -184,6 +184,15 @@ size_t output_queued() {
   return g_count;
 }
 
+// O downmix soma até 2,4× o pico de um canal (FL + 0,707·C + 0,707·BL): em momentos fortes passava de 1,0 e era
+// cortado a seco (estalido). Até 0,8 o sinal passa igual; acima, uma curva tanh aproxima-o de 1,0 sem o cortar.
+static float soft_limit(float x) {
+  const float a = std::fabs(x);
+  if (a <= 0.8f) return x;
+  const float y = 0.8f + 0.2f * std::tanh((a - 0.8f) / 0.2f);
+  return x < 0 ? -y : y;
+}
+
 // Quadro do XAudio: 256 amostras × 6 canais planar, float big-endian.
 void output_submit_frame(const uint8_t* be_planar6) {
   constexpr int n = 256;
@@ -219,11 +228,13 @@ void output_submit_frame(const uint8_t* be_planar6) {
   constexpr float k = 0.7071f;
   const float volume = config::get().volume;
   for (int i = 0; i < n; i++) {
-    float c = rd(2, i) * k, lfe = rd(3, i) * 0.5f;
-    float l = (rd(0, i) + c + rd(4, i) * k + lfe) * volume;
-    float r = (rd(1, i) + c + rd(5, i) * k + lfe) * volume;
-    stereo[2 * i] = l < -1.f ? -1.f : l > 1.f ? 1.f : l;
-    stereo[2 * i + 1] = r < -1.f ? -1.f : r > 1.f ? 1.f : r;
+    // ITU-R BS.775 (e o Xenia): o LFE não entra no estéreo. Somá-lo a 50% nos dois lados duplicava o grave, que o XAudio já
+    // mistura nos canais principais (pico do LFE ~0,57 na abertura).
+    float c = rd(2, i) * k;
+    float l = (rd(0, i) + c + rd(4, i) * k) * volume;
+    float r = (rd(1, i) + c + rd(5, i) * k) * volume;
+    stereo[2 * i] = soft_limit(l);
+    stereo[2 * i + 1] = soft_limit(r);
   }
   if (g_dump) {
     std::fwrite(stereo, sizeof(float), n * 2, g_dump);

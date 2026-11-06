@@ -92,6 +92,9 @@ void ppc_trap(PPCContext& ctx, uint8_t* mem_base, uint32_t addr, uint32_t insn);
 void ppc_unimplemented(PPCContext& ctx, uint8_t* mem_base, uint32_t addr, uint32_t insn);
 void ppc_unreachable(PPCContext& ctx, uint8_t* mem_base, uint32_t addr);
 uint64_t ppc_mftb();
+// Escrita byte-reversed (stwbrx) no bloco MMIO do XMA (0x7FEA0000): o jogo escreve Kick/Lock/Clear assim e o hardware
+// reage antes da instrução seguinte (o Xenia também processa o Kick de forma síncrona).
+void ppc_mmio_st32r(uint8_t* mem_base, uint32_t ea, uint32_t v);
 
 extern const PPCFuncMapping g_ppc_func_table[];
 extern const uint32_t g_ppc_func_count;
@@ -143,7 +146,10 @@ static inline uint16_t ppc_ld16r(const uint8_t* b, uint32_t ea) { uint16_t v; st
 static inline uint32_t ppc_ld32r(const uint8_t* b, uint32_t ea) { uint32_t v; std::memcpy(&v, PPC_HOST(b, ea), 4); return v; }
 static inline uint64_t ppc_ld64r(const uint8_t* b, uint32_t ea) { uint64_t v; std::memcpy(&v, PPC_HOST(b, ea), 8); return v; }
 static inline void ppc_st16r(uint8_t* b, uint32_t ea, uint16_t v) { std::memcpy(PPC_HOST(b, ea), &v, 2); }
-static inline void ppc_st32r(uint8_t* b, uint32_t ea, uint32_t v) { std::memcpy(PPC_HOST(b, ea), &v, 4); }
+static inline void ppc_st32r(uint8_t* b, uint32_t ea, uint32_t v) {
+  if (__builtin_expect((ea >> 16) == 0x7FEAu, 0)) return ppc_mmio_st32r(b, ea, v);
+  std::memcpy(PPC_HOST(b, ea), &v, 4);
+}
 static inline void ppc_st64r(uint8_t* b, uint32_t ea, uint64_t v) { std::memcpy(PPC_HOST(b, ea), &v, 8); }
 
 static inline float ppc_ldf32(const uint8_t* b, uint32_t ea) { return std::bit_cast<float>(ppc_ld32(b, ea)); }

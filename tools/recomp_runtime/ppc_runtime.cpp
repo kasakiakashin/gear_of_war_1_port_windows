@@ -62,6 +62,8 @@ void ppc_unreachable(PPCContext&, uint8_t*, uint32_t addr) {
   std::abort();
 }
 
+void ppc_mmio_st32r(uint8_t* b, uint32_t ea, uint32_t v) { std::memcpy(PPC_HOST(b, ea), &v, 4); }
+
 uint64_t ppc_mftb() {
   // Timebase do Xenon: 49.875 MHz
   using namespace std::chrono;

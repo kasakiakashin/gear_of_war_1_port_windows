@@ -16,6 +16,7 @@
 #include "kernel/diag.h"
 #include "kernel/time_bundle.h"
 #include "ppc_context.h"
+#include "apu/apu.h"
 
 namespace {
 
@@ -195,6 +196,8 @@ void ppc_unreachable(PPCContext&, uint8_t*, uint32_t addr) {
   diag::crash_report();
   std::abort();
 }
+
+void ppc_mmio_st32r(uint8_t*, uint32_t ea, uint32_t v) { apu::xma_mmio_store(ea, v); }
 
 uint64_t ppc_mftb() {
   // Mesma frequência que KeQueryPerformanceFrequency devolve ao convidado.

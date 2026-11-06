@@ -15,6 +15,7 @@ struct XmaStream {
   uint32_t channels = 0, rate = 0;
   std::vector<int16_t> pcm;  // PCM descodificado ainda não escrito no anel de saída (intercalado, nativo)
   size_t pcm_pos = 0;
+  bool fed = false;  // pacotes entregues ao descodificador desde o último esvaziamento (o FFmpeg retém até 4096 amostras)
   // GOW_DEBUG_AUDIO_DROPS: contagens desde o último Clear
   uint64_t dbg_packets = 0, dbg_samples = 0, dbg_rejected = 0, dbg_open_fail = 0, dbg_starved = 0, dbg_recv_err = 0;
 };
@@ -22,6 +23,8 @@ struct XmaStream {
 bool xma_decoder_init();  // carrega o FFmpeg (uma vez); false = modo silencioso
 void xma_flush(XmaStream& s);  // só o estado do descodificador; o PCM já descodificado fica
 void xma_reset(XmaStream& s);  // descarta estado e PCM pendente (Clear / contexto novo)
+// Fim da entrada: entrega ao descodificador um pacote vazio (EOF), recolhe o que ele retinha e deixa-o pronto para um fluxo novo.
+void xma_drain(XmaStream& s);
 // Descodifica um pacote e acrescenta o PCM a s.pcm. channels 1/2, rate em Hz.
 void xma_decode_packet(XmaStream& s, const uint8_t* packet, uint32_t channels, uint32_t rate);
 

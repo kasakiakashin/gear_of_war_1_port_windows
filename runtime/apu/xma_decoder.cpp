@@ -13,6 +13,7 @@
 #include "apu/xma_decoder.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -117,8 +118,10 @@ void* open_codec(uint32_t channels, uint32_t rate) {
   return ctx;
 }
 
+// Arredonda ao mais próximo e satura, como o ConvertFrame do Xenia (cvtps + packs). Truncar para zero puxava os sinais baixos
+// para zero (distorção de cruzamento); o FFmpeg também devolve valores acima de 1,0.
 int16_t to_s16(float v) {
-  v *= 32767.0f;
+  v = std::nearbyint(v * 32767.0f);
   return (int16_t)(v > 32767.f ? 32767 : v < -32768.f ? -32768 : (int)v);
 }
 
@@ -181,6 +184,18 @@ void xma_reset(XmaStream& s) {
   if (s.codec && g_ok) g_ff.flush_buffers(s.codec);
   s.pcm.clear();
   s.pcm_pos = 0;
+  s.fed = false;
+}
+
+void xma_drain(XmaStream& s) {
+  s.fed = false;
+  if (!g_ok || !s.codec) return;
+  if (s.pcm_pos && s.pcm_pos == s.pcm.size()) {
+    s.pcm.clear();
+    s.pcm_pos = 0;
+  }
+  if (g_ff.send_packet(s.codec, nullptr) >= 0) receive(s);
+  g_ff.flush_buffers(s.codec);
 }
 
 void xma_flush(XmaStream& s) {
