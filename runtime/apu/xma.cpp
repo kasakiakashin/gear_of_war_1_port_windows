@@ -55,20 +55,29 @@ bool g_debug_drops = false;  // GOW_DEBUG_AUDIO_DROPS=1
 const char* g_dump_dir = nullptr;  // GOW_XMA_DUMP_DIR: PCM de cada contexto, para análise
 uint64_t g_stat_packets = 0, g_stat_skips = 0, g_stat_starved = 0, g_stat_jumps = 0, g_stat_trimmed = 0;
 apu::XmaStream g_streams[kCtxCount];  // estado do descodificador por contexto (host)
-uint64_t g_dbg_out_invalid[kCtxCount] = {}, g_dbg_kicks[kCtxCount] = {};
+uint64_t g_dbg_out_invalid[kCtxCount] = {}, g_dbg_kicks[kCtxCount] = {}, g_dbg_full_kept[kCtxCount] = {};
+// Anel de saída deixado cheio pela última passagem (read == write também é "vazio"): enquanto o jogo não mexer no read offset,
+// não há espaço, mesmo que volte a marcar a saída como válida.
+bool g_ring_full[kCtxCount] = {};
 
 // Resumo de um contexto quando o jogo o limpa ou liberta: quanto entrou, quanto saiu e o que ficou por tocar.
 void debug_summary(uint32_t i, const char* why) {
   apu::XmaStream& s = g_streams[i];
   if (!g_debug_drops || (!s.dbg_packets && !g_dbg_kicks[i])) return;
   std::fprintf(stderr, "[audio-drops] ctx %u %s: %u canais %u Hz, %llu kicks, %llu pacotes, %llu amostras, %llu recusados, %llu erros de "
-                       "receive, %llu falhas de open, %llu esperas, %llu passagens sem saída válida, %zu amostras por escrever descartadas\n",
+                       "receive, %llu falhas de open, %llu esperas, %llu passagens sem saída válida, %llu com o anel ainda cheio, %zu amostras por escrever descartadas\n",
                i, why, s.channels, s.rate, (unsigned long long)g_dbg_kicks[i], (unsigned long long)s.dbg_packets,
                (unsigned long long)s.dbg_samples, (unsigned long long)s.dbg_rejected, (unsigned long long)s.dbg_recv_err,
                (unsigned long long)s.dbg_open_fail, (unsigned long long)s.dbg_starved, (unsigned long long)g_dbg_out_invalid[i],
-               s.pcm.size() - s.pcm_pos);
-  s.dbg_packets = s.dbg_samples = s.dbg_rejected = s.dbg_recv_err = s.dbg_open_fail = s.dbg_starved = 0;
-  g_dbg_out_invalid[i] = g_dbg_kicks[i] = 0;
+               (unsigned long long)g_dbg_full_kept[i], s.pcm.size() - s.pcm_pos);
+  // Estado que o jogo vê nesse momento: entradas por consumir, saída válida, anel (leitura/escrita/blocos), ativo.
+  uint32_t d[16];
+  for (int w = 0; w < 16; w++) d[w] = ppc_ld32(gm::base(), g_array_va + i * kCtxSize + 4 * w);
+  std::fprintf(stderr, "[audio-drops]   entradas válidas %u/%u (atual %u, pacote %u de %u/%u), saída válida %u, anel lido %u escrito %u de %u, loop %u, %s\n",
+               (d[0] >> 20) & 1, (d[0] >> 21) & 1, d[4] >> 31, (d[2] & 0x3FFFFFF) / kPacketBits, d[0] & 0xFFF, d[1] & 0xFFF,
+               d[1] >> 31, d[9] & 31, (d[0] >> 27) & 31, (d[0] >> 22) & 31, (d[0] >> 12) & 0xFF, g_enabled[i] ? "ativo" : "trancado");
+  s.dbg_packets =s.dbg_samples = s.dbg_rejected = s.dbg_recv_err = s.dbg_open_fail = s.dbg_starved = 0;
+  g_dbg_out_invalid[i] = g_dbg_kicks[i] = g_dbg_full_kept[i] = 0;
 }
 
 volatile LONG* reg(uint32_t i) { return reinterpret_cast<volatile LONG*>(gm::base() + gm::kXmaRegBase + 4 * i); }
@@ -89,6 +98,28 @@ void load(uint32_t i, Ctx& c) {
 }
 void store(uint32_t i, const Ctx& c) {
   for (int w = 0; w < 16; w++) ppc_st32(gm::base(), ctx_va(i) + 4 * w, c.d[w]);
+}
+
+std::atomic<uint64_t> g_dbg_conflicts{0};  // palavras que o jogo mudou durante uma passagem (GOW_DEBUG_AUDIO_DROPS)
+
+// Fim de uma passagem: só os bits que a passagem mudou, por compare-and-swap sobre o valor atual. O XAudio do jogo escreve no
+// contexto sem Lock enquanto ele está ativo (buffers de entrada novos e válidos, deslocamento de leitura da saída, saída válida
+// outra vez); gravar as 16 palavras lidas no início apagava essas escritas, e a voz ficava sem o buffer que o jogo tinha entregue.
+void store_changes(uint32_t i, const Ctx& before, const Ctx& c) {
+  for (int w = 0; w < 16; w++) {
+    const uint32_t changed = before.d[w] ^ c.d[w];
+    auto* p = reinterpret_cast<volatile LONG*>(PPC_HOST(gm::base(), ctx_va(i) + 4 * w));
+    if (!changed) {
+      if (_byteswap_ulong((uint32_t)*p) != before.d[w]) g_dbg_conflicts.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    for (;;) {
+      const uint32_t cur_be = (uint32_t)*p, cur = _byteswap_ulong(cur_be);
+      if (cur != before.d[w]) g_dbg_conflicts.fetch_add(1, std::memory_order_relaxed);
+      const uint32_t next = (cur & ~changed) | (c.d[w] & changed);
+      if ((uint32_t)InterlockedCompareExchange(p, (LONG)_byteswap_ulong(next), (LONG)cur_be) == cur_be) break;
+    }
+  }
 }
 
 void swap_input(Ctx& c) {
@@ -139,6 +170,11 @@ void decode(uint32_t i, Ctx& c) {
   if (wr >= block_count) wr = 0;
   // Anel como o RingBuffer do Xenia: read == write = vazio (capacidade inteira livre).
   uint32_t free_blocks = rd == wr ? block_count : (rd > wr ? rd - wr : block_count - wr + rd);
+  if (g_ring_full[i] && rd == wr) {  // ainda cheio: nada lido desde a última passagem
+    g_dbg_full_kept[i]++;
+    return;
+  }
+  g_ring_full[i] = false;
   static const uint32_t kRates[4] = {24000, 32000, 44100, 48000};
   const uint32_t rate = kRates[c.get(1, 27, 2)];
   uint8_t* out = phys_ptr(c.d[7]);
@@ -229,7 +265,10 @@ void decode(uint32_t i, Ctx& c) {
     c.set(2, 0, 26, next >= packet_count ? packet_count * kPacketBits : next * kPacketBits + 32);
   }
   c.set(0, 27, 5, wr);
-  if (wrote && wr == rd) c.set(1, 31, 1, 0);  // anel cheio
+  if (wrote && wr == rd) {  // anel cheio
+    c.set(1, 31, 1, 0);
+    g_ring_full[i] = true;
+  }
 }
 
 void apply(uint32_t base_reg, int kind) {
@@ -252,6 +291,7 @@ void apply(uint32_t base_reg, int kind) {
         c.set(0, 27, 5, 0);
         store(i, c);
         apu::xma_reset(g_streams[i]);
+        g_ring_full[i] = false;
       } else {
         g_enabled[i] = true;  // Kick
         g_kicks.fetch_add(1, std::memory_order_relaxed);
@@ -274,8 +314,9 @@ DWORD WINAPI xma_thread(LPVOID) {
         if (!g_enabled[i].load(std::memory_order_relaxed)) continue;
         Ctx c;
         load(i, c);
+        const Ctx before = c;
         decode(i, c);
-        store(i, c);
+        store_changes(i, before, c);
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -289,6 +330,9 @@ namespace apu {
 void xma_stats(uint64_t& packets, uint64_t& skips, uint64_t& starved, uint64_t& loops) {
   std::lock_guard<std::mutex> lock(g_mu);
   packets = g_stat_packets, skips = g_stat_skips, starved = g_stat_starved, loops = g_stat_jumps;
+  if (g_debug_drops)
+    std::fprintf(stderr, "[audio-drops] %llu palavras de contexto mudadas pelo jogo durante uma passagem (preservadas)\n",
+                 (unsigned long long)g_dbg_conflicts.load());
   if (g_trace) std::fprintf(stderr, "[xma] %llu quadros cortados no fim de loops\n", (unsigned long long)g_stat_trimmed);
 }
 
@@ -321,6 +365,7 @@ XBOX_IMPORT(XMACreateContext) {
     g_used[i] = true;
     g_enabled[i] = false;
     apu::xma_reset(g_streams[i]);
+    g_ring_full[i] = false;
     for (uint32_t o = 0; o < kCtxSize; o += 4) ppc_st32(mem_base, ctx_va(i) + o, 0);
     out32(mem_base, arg(ctx, 0), ctx_va(i));
     return ret_status(ctx, kStatusSuccess);
