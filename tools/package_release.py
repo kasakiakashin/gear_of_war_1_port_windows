@@ -22,7 +22,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "1.0.0"
+DEFAULT_VERSION = "1.0.1"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
 SHADER_PACK = "prebuilt_shaders.bin"  # exceções ao .bin de FORBIDDEN
@@ -73,8 +73,9 @@ GRAFICOS
     Original Xbox 360  720p, 30 FPS, sem extras
     PC Moderno         1080p, 60 FPS, filtro anisotropico 8x, oclusao ambiente (GTAO)
     Ultra Next-Gen     1440p, 60 FPS, anisotropico 16x, GTAO + luz indireta (SSRTGI) + reflexos (SSR)
+                       + oclusao ambiente com raios (DXR 1.1, so em GPUs que o suportam)
   Cada opcao pode ser mudada a parte em F8 > Avancado & RT. Os efeitos de ecra sao aproximacoes (o jogo nao
-  da normais nem a matriz da camara). O ray tracing (DXR) so e detetado: ainda nao ha efeitos com raios.
+  da normais nem a matriz da camara). O ray tracing (DXR 1.1) faz oclusao ambiente com raios sobre a geometria da cena.
 
 CO-OP
   Anfitriao: F8 > Multiplayer > "Gerar Sala Co-op" > "Copiar Convite", e envie-o ao amigo.
