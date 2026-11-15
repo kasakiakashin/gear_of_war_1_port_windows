@@ -19,7 +19,18 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 ### Funcionalidades
 
 - **Recompilação estática:** 2,4 milhões de instruções PowerPC (VMX/VMX128 incluído) traduzidas para C++.
-- **Direct3D 12:** resolução interna até 4K e FSR 1.0 (EASU + RCAS).
+- **Direct3D 12:** resolução interna de 0,5× (360p) a 3× (4K) e FSR 1.0 (EASU + RCAS) para ampliar as escalas abaixo de 1×.
+- **Presets gráficos** (aba Vídeo do launcher e do F8): PC Fraco (540p + FSR, 30 FPS), Original Xbox 360 (720p, 30 FPS),
+  PC Moderno (1080p, 60 FPS, AF 8×, GTAO) e Ultra Next-Gen (1440p, AF 16×, GTAO + SSRTGI + SSR).
+- **Gráficos avançados** (aba "Avançado & RT"): filtro anisotrópico 2–16× só nas texturas 2D com mips e filtro linear;
+  GTAO, luz indireta de 1 rebote (SSRTGI) e reflexos (SSR) em espaço de ecrã sobre a cena HDR, antes do pós-processamento e
+  do HUD, a meia ou inteira resolução; render targets FP16 sem o limite 7e3 do Xenos; curva fílmica e vibrância. Os efeitos
+  de ecrã são aproximações: o jogo não expõe normais nem a matriz de projeção (FOV de 70° assumido).
+- **Resolves zero-copy** (`ZeroCopyResolves`): a cópia de um resolve só se faz quando o destino é lido ou a fonte vai ser
+  reescrita; se o destino for resolvido outra vez antes disso, não se faz. No corredor do 1.º nível não evita nenhuma cópia
+  (as 4 por frame que nunca são lidas têm a fonte reescrita antes), por isso o ganho medido aí é nulo.
+- **Ray tracing (DXR 1.1):** só deteção e indicador no menu. Os vertex shaders do jogo são microcódigo traduzido e as matrizes
+  não estão em constantes fixas, por isso não há geometria em espaço do mundo para construir as estruturas de aceleração.
 - **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real. Com "FPS adaptativo"
   (`AdaptiveFps=1`, por omissão), uma cena que não aguenta 60 fica a 30 estáveis em vez de oscilar.
 - **Cache de PSOs:** os pipelines compilados pelo driver ficam em `user_data/shader_cache/pipelines.bin` e a lista dos usados em
@@ -34,7 +45,7 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 - **Co-op e Versus em System Link por túnel UDP P2P:** no menu **F8**, com um link de convite.
 - **Leitura direta da ISO:** sem extrair 6,22 GB; ficheiros soltos em `extracted/` têm prioridade (mods).
 - **Som:** WASAPI, com áudio XMA descodificado pelo FFmpeg.
-- **Menu F8 com 4 abas:** vídeo, áudio e idioma, controlos e Co-op, em tempo real.
+- **Menu F8 com 5 abas:** vídeo, avançado & RT, áudio e idioma, controlos e Co-op, em tempo real.
 - **Entrada:** comando XInput ou teclado e rato, com todas as teclas remapeáveis.
 - **Idiomas do disco:** inglês, alemão, francês, italiano e espanhol (Espanha e América Latina); coreano e chinês só em
   texto. O disco não tem português.
@@ -177,7 +188,18 @@ It is not an emulator and does not use the original source code.
 ### Features
 
 - **Static recompilation:** 2.4 million PowerPC instructions (including VMX/VMX128) translated to C++.
-- **Direct3D 12:** internal resolution up to 4K and FSR 1.0 (EASU + RCAS).
+- **Direct3D 12:** internal resolution from 0.5× (360p) to 3× (4K) and FSR 1.0 (EASU + RCAS) to upscale the scales below 1×.
+- **Graphics presets** (Video tab of the launcher and F8): Low-Spec PC (540p + FSR, 30 FPS), Original Xbox 360 (720p, 30 FPS),
+  Modern PC (1080p, 60 FPS, 8× AF, GTAO) and Ultra Next-Gen (1440p, 16× AF, GTAO + SSRTGI + SSR).
+- **Advanced graphics** ("Advanced & RT" tab): 2–16× anisotropic filtering only on 2D textures with mips and linear filtering;
+  screen-space GTAO, one-bounce indirect light (SSRTGI) and reflections (SSR) on the HDR scene, before post-processing and the
+  HUD, at half or full resolution; FP16 render targets without the Xenos 7e3 limit; filmic curve and vibrance. The screen-space
+  effects are approximations: the game exposes neither normals nor the projection matrix (a 70° FOV is assumed).
+- **Zero-copy resolves** (`ZeroCopyResolves`): a resolve copy is only made when its destination is read or its source is about
+  to be overwritten; if the destination is resolved again first, it is skipped. In the first level's corridor it avoids no copy
+  (the 4 per frame that are never read have their source overwritten first), so the measured gain there is nil.
+- **Ray tracing (DXR 1.1):** detection and a menu indicator only. The game's vertex shaders are translated microcode and the
+  matrices are not in fixed constants, so there is no world-space geometry to build acceleration structures from.
 - **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time. With "adaptive FPS"
   (`AdaptiveFps=1`, the default), a scene that cannot hold 60 stays at a steady 30 instead of oscillating.
 - **PSO cache:** pipelines compiled by the driver are kept in `user_data/shader_cache/pipelines.bin` and the list of used ones in
@@ -193,7 +215,7 @@ It is not an emulator and does not use the original source code.
 - **Co-op and Versus over System Link through a P2P UDP tunnel:** in the **F8** menu, with an invite link.
 - **Direct ISO reading:** no need to extract 6.22 GB; loose files in `extracted/` take priority (mods).
 - **Sound:** WASAPI, with XMA audio decoded by FFmpeg.
-- **Four-tab F8 menu:** video, audio and language, controls and co-op, in real time.
+- **Five-tab F8 menu:** video, advanced & RT, audio and language, controls and co-op, in real time.
 - **Input:** XInput gamepad or keyboard and mouse, with every key remappable.
 - **Disc languages:** English, German, French, Italian and Spanish (Spain and Latin America); Korean and Chinese are text
   only. The disc has no Portuguese.

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "config.h"
+#include "gpu/renderer.h"
 #include "gpu/window.h"
 #include "keybinds.h"
 #include "language.h"
@@ -25,18 +26,26 @@ namespace {
 
 enum Id {
   kTabFirst = 100,  // 100..103
-  kScale = 110, kScalePreview, kFullscreen, kFsr, kStrength, kStrengthText, kVsync, kFpsLimit, kAdaptiveFps,
+  kScale = 110, kScalePreview, kFullscreen, kFsr, kStrength, kStrengthText, kVsync, kFpsLimit, kAdaptiveFps, kPreset, kPresetNote,
+  kAniso = 500, kGtao, kGtaoLevel, kGtaoText, kGi, kGiLevel, kGiText, kSsr, kSsrLevel, kSsrText, kHalfRes, kFp16, kTonemap,
+  kVibrance, kVibranceText, kDxr, kDxrNote, kZeroCopy,
   kVolume = 130, kVolumeText, kLanguage, kLanguageNote,
   kMouse = 150, kMouseText, kInvertY, kRestoreKeys, kKeysNote,
   kKeyFirst = 200,  // 200..200+kActionCount
   kCreateRoom = 300, kInviteBox, kCopyInvite, kCopyFeedback, kJoinBox, kConnect, kDisconnect, kNetState, kNetDetail,
   kClose = 400
 };
-constexpr int kTabs = 4, kWidth = 860, kHeight = 660, kContentTop = 92, kContentLeft = 18, kContentW = kWidth - 36;
+constexpr int kTabs = 5, kWidth = 860, kHeight = 660, kContentTop = 92, kContentLeft = 18, kContentW = kWidth - 36;
 constexpr UINT_PTR kTimer = 1;
-constexpr float kScales[] = {1.0f, 1.5f, 2.0f, 3.0f};
-const wchar_t* const kScaleNames[] = {L"1.0×  (720p)", L"1.5×  (1080p)", L"2.0×  (1440p)", L"3.0×  (4K)"};
-const wchar_t* const kTabNames[kTabs] = {L"VÍDEO", L"ÁUDIO E IDIOMA", L"CONTROLOS", L"MULTIPLAYER CO-OP"};
+constexpr float kScales[] = {0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f};
+constexpr int kScaleCount = 6;
+const wchar_t* const kScaleNames[kScaleCount] = {L"0.5×  (360p, usar com FSR)", L"0.75×  (540p, usar com FSR)", L"1.0×  (720p)",
+                                                 L"1.5×  (1080p)", L"2.0×  (1440p)", L"3.0×  (4K)"};
+const wchar_t* const kTabNames[kTabs] = {L"VÍDEO", L"AVANÇADO & RT", L"ÁUDIO E IDIOMA", L"CONTROLOS", L"MULTIPLAYER"};
+const wchar_t* const kPresetNames[config::kPresetCount + 1] = {L"PC Fraco", L"Original Xbox 360", L"PC Moderno", L"Ultra Next-Gen",
+                                                              L"Personalizado"};
+constexpr int kAnisoChoices[] = {0, 2, 4, 8, 16};
+const wchar_t* const kAnisoNames[] = {L"Desligado (como no Xbox 360)", L"2×", L"4×", L"8×", L"16×"};
 constexpr int kFpsChoices[] = {30, 60, 120, 0};
 const wchar_t* const kFpsNames[] = {L"30 FPS (como no Xbox 360)", L"60 FPS", L"120 FPS", L"Ilimitado"};
 
@@ -170,51 +179,136 @@ void build_video(HWND h) {
   g_build_tab = 0;
   const int x = kContentLeft + 18;
   int y = kContentTop + 44;
-  panel(0, kContentLeft, kContentTop, kContentW, 430, L"Imagem");
+  panel(0, kContentLeft, kContentTop, kContentW, 500, L"Imagem");
+  label(h, L"Preset gráfico", x, y + 4, 200, 22, g_bold);
+  add(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kPreset, x + 210, y, 300, 200);
+  for (int i = 0; i <= config::kPresetCount; i++) SendDlgItemMessageW(h, kPreset, CB_ADDSTRING, 0, (LPARAM)kPresetNames[i]);
+  label(h, L"", x + 524, y + 4, 270, 22, nullptr, kPresetNote);
+  y += 42;
   label(h, L"Escala de resolução", x, y + 4, 200);
-  add(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kScale, x + 210, y, 200, 200);
-  size_t sel = 0;
-  for (size_t i = 0; i < 4; i++) {
-    SendDlgItemMessageW(h, kScale, CB_ADDSTRING, 0, (LPARAM)kScaleNames[i]);
-    if (std::fabs(kScales[i] - c.resolution_scale) < std::fabs(kScales[sel] - c.resolution_scale)) sel = i;
-  }
-  SendDlgItemMessageW(h, kScale, CB_SETCURSEL, sel, 0);
+  add(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kScale, x + 210, y, 300, 240);
+  for (int i = 0; i < kScaleCount; i++) SendDlgItemMessageW(h, kScale, CB_ADDSTRING, 0, (LPARAM)kScaleNames[i]);
   y += 34;
   label(h, L"", x + 210, y, 560, 22, nullptr, kScalePreview);
   y += 42;
   check(h, L"Ecrã inteiro (Alt+Enter)", kFullscreen, x, y, 500, window::is_fullscreen());
   y += 42;
-  check(h, L"Nitidez FSR 1.0 (ampliação EASU + nitidez RCAS)", kFsr, x, y, 500, c.sharpening);
+  check(h, L"FSR 1.0 (ampliação EASU + nitidez RCAS; recomendado com escala abaixo de 1.0×)", kFsr, x, y, 700, c.sharpening);
   y += 36;
   label(h, L"", x, y + 4, 200, 22, nullptr, kStrengthText);
   slider(h, kStrength, x + 210, y, 360, 0, 100, (int)std::lround(c.sharpening_strength * 100));
-  set_text(h, kStrengthText, L"Força do FSR: %.2f", c.sharpening_strength);
   y += 54;
   check(h, L"VSync (sincronizar com o monitor)", kVsync, x, y, 500, c.vsync);
   y += 42;
   label(h, L"Limite de FPS", x, y + 4, 200);
   add(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kFpsLimit, x + 210, y, 360, 200);
-  int fps_sel = 0;
-  for (int i = 0; i < 4; i++) {
-    SendDlgItemMessageW(h, kFpsLimit, CB_ADDSTRING, 0, (LPARAM)kFpsNames[i]);
-    if (kFpsChoices[i] == c.fps_limit) fps_sel = i;
-  }
-  SendDlgItemMessageW(h, kFpsLimit, CB_SETCURSEL, fps_sel, 0);
+  for (int i = 0; i < 4; i++) SendDlgItemMessageW(h, kFpsLimit, CB_ADDSTRING, 0, (LPARAM)kFpsNames[i]);
   y += 42;
   check(h, L"FPS adaptativo (desce para metade se a cena não aguentar)", kAdaptiveFps, x, y, 600, c.adaptive_fps);
 }
 
-void build_audio(HWND h) {
-  const config::Config& c = config::get();
+const wchar_t* dxr_text() {
+  const int tier = gpu::render::raytracing_tier();
+  if (tier >= 11) return L"DXR 1.1 disponível nesta GPU. Efeitos com raios ainda não implementados neste port (ver README).";
+  if (tier == 10) return L"(Indisponível nesta GPU - requer RTX / RX 6000+)  Só DXR 1.0, sem RayQuery.";
+  return L"(Indisponível nesta GPU - requer RTX / RX 6000+)";
+}
+
+void build_advanced(HWND h) {
   g_build_tab = 1;
   const int x = kContentLeft + 18;
-  panel(1, kContentLeft, kContentTop, kContentW, 120, L"Som");
+  int y = kContentTop + 44;
+  panel(1, kContentLeft, kContentTop, kContentW, 516, L"Gráficos Avançados & Ray Tracing");
+  label(h, L"Filtro anisotrópico", x, y + 4, 200);
+  add(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kAniso, x + 210, y, 300, 200);
+  for (const wchar_t* n : kAnisoNames) SendDlgItemMessageW(h, kAniso, CB_ADDSTRING, 0, (LPARAM)n);
+  label(h, L"Só texturas 2D com mips", x + 524, y + 4, 270);
+  y += 40;
+  auto effect = [&](const wchar_t* name, int id, int level, int text) {
+    check(h, name, id, x, y, 330, false);
+    label(h, L"", x + 340, y + 2, 140, 22, nullptr, text);
+    slider(h, level, x + 480, y - 2, 300, 0, 100, 50);
+    y += 34;
+  };
+  effect(L"GTAO (oclusão ambiente)", kGtao, kGtaoLevel, kGtaoText);
+  effect(L"SSRTGI (luz indireta, 1 rebote)", kGi, kGiLevel, kGiText);
+  effect(L"SSR (reflexos em espaço de ecrã)", kSsr, kSsrLevel, kSsrText);
+  check(h, L"Efeitos de ecrã a meia resolução (upsample bilateral; mais leve)", kHalfRes, x, y, 700, false);
+  y += 34;
+  label(h, L"Aplicados à cena HDR antes do pós-processamento e do HUD, a partir da profundidade do jogo. São aproximações: o jogo "
+           L"não dá normais nem a matriz de projeção.", x, y, 780, 40);
+  y += 48;
+  check(h, L"Render targets HDR em FP16 completo (sem o limite 7e3 do Xenos)", kFp16, x, y, 700, false);
+  y += 34;
+  check(h, L"Curva fílmica suave na imagem final", kTonemap, x, y, 330, false);
+  label(h, L"", x + 340, y + 2, 140, 22, nullptr, kVibranceText);
+  slider(h, kVibrance, x + 480, y - 2, 300, 0, 100, 0);
+  y += 40;
+  check(h, L"Ray Tracing DXR 1.1 (sombras de contacto e AO)", kDxr, x, y, 400, false);
+  y += 28;
+  label(h, dxr_text(), x + 20, y, 760, 22, nullptr, kDxrNote);
+  y += 34;
+  check(h, L"Resolves zero-copy (não copiar o que é reescrito antes de ser lido)", kZeroCopy, x, y, 700, false);
+}
+
+// Valores atuais da config nos controlos das abas Vídeo e Avançado (ao abrir e depois de um preset).
+void sync_controls(HWND h) {
+  const config::Config& c = config::get();
+  int sel = 0;
+  for (int i = 0; i < kScaleCount; i++)
+    if (std::fabs(kScales[i] - c.resolution_scale) < std::fabs(kScales[sel] - c.resolution_scale)) sel = i;
+  SendDlgItemMessageW(h, kScale, CB_SETCURSEL, sel, 0);
+  const int p = config::preset_index(c.preset);
+  SendDlgItemMessageW(h, kPreset, CB_SETCURSEL, p < 0 ? config::kPresetCount : p, 0);
+  CheckDlgButton(h, kFsr, c.sharpening ? BST_CHECKED : BST_UNCHECKED);
+  SendDlgItemMessageW(h, kStrength, TBM_SETPOS, TRUE, (int)std::lround(c.sharpening_strength * 100));
+  set_text(h, kStrengthText, L"Força do FSR: %.2f", c.sharpening_strength);
+  int fps_sel = 0;
+  for (int i = 0; i < 4; i++)
+    if (kFpsChoices[i] == c.fps_limit) fps_sel = i;
+  SendDlgItemMessageW(h, kFpsLimit, CB_SETCURSEL, fps_sel, 0);
+  CheckDlgButton(h, kAdaptiveFps, c.adaptive_fps ? BST_CHECKED : BST_UNCHECKED);
+  int a = 0;
+  for (int i = 0; i < 5; i++)
+    if (kAnisoChoices[i] == c.anisotropy) a = i;
+  SendDlgItemMessageW(h, kAniso, CB_SETCURSEL, a, 0);
+  auto effect = [&](int id, bool on, int level, int text, float v, const wchar_t* fmt) {
+    CheckDlgButton(h, id, on ? BST_CHECKED : BST_UNCHECKED);
+    SendDlgItemMessageW(h, level, TBM_SETPOS, TRUE, (int)std::lround(v * 100));
+    set_text(h, text, fmt, v * 100);
+  };
+  effect(kGtao, c.gtao, kGtaoLevel, kGtaoText, c.gtao_intensity, L"Intensidade: %.0f%%");
+  effect(kGi, c.ssrtgi, kGiLevel, kGiText, c.ssrtgi_intensity, L"Intensidade: %.0f%%");
+  effect(kSsr, c.ssr, kSsrLevel, kSsrText, c.ssr_intensity, L"Intensidade: %.0f%%");
+  effect(kTonemap, c.tonemap, kVibrance, kVibranceText, c.vibrance, L"Vibrância: %.0f%%");
+  CheckDlgButton(h, kHalfRes, c.ss_half_res ? BST_CHECKED : BST_UNCHECKED);
+  CheckDlgButton(h, kFp16, c.fp16_targets ? BST_CHECKED : BST_UNCHECKED);
+  // Só deteção: sem geometria em espaço do mundo não há estruturas de aceleração (README), por isso a caixa nunca liga nada.
+  CheckDlgButton(h, kDxr, BST_UNCHECKED);
+  EnableWindow(GetDlgItem(h, kDxr), FALSE);
+  CheckDlgButton(h, kZeroCopy, c.zero_copy ? BST_CHECKED : BST_UNCHECKED);
+}
+
+// Alteração manual de uma opção que os presets definem: deixa de ser o preset.
+void mark_custom(HWND h) {
+  config::Config& c = config::edit();
+  if (c.preset == "Custom") return;
+  c.preset = "Custom";
+  SendDlgItemMessageW(h, kPreset, CB_SETCURSEL, config::kPresetCount, 0);
+  SetDlgItemTextW(h, kPresetNote, L"");
+}
+
+void build_audio(HWND h) {
+  const config::Config& c = config::get();
+  g_build_tab = 2;
+  const int x = kContentLeft + 18;
+  panel(2, kContentLeft, kContentTop, kContentW, 120, L"Som");
   int y = kContentTop + 52;
   label(h, L"", x, y + 4, 200, 22, nullptr, kVolumeText);
   slider(h, kVolume, x + 210, y, 500, 0, 100, (int)std::lround(c.volume * 100));
   set_text(h, kVolumeText, L"Volume geral: %.0f%%", c.volume * 100);
   const int top = kContentTop + 136;
-  panel(1, kContentLeft, top, kContentW, 260, L"Idioma do jogo");
+  panel(2, kContentLeft, top, kContentW, 260, L"Idioma do jogo");
   y = top + 48;
   label(h, L"Falas e legendas", x, y + 4, 200);
   add(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kLanguage, x + 210, y, 500, 320);
@@ -233,16 +327,16 @@ void build_audio(HWND h) {
 
 void build_controls(HWND h) {
   const config::Config& c = config::get();
-  g_build_tab = 2;
+  g_build_tab = 3;
   const int x = kContentLeft + 18;
-  panel(2, kContentLeft, kContentTop, kContentW, 96, L"Rato");
+  panel(3, kContentLeft, kContentTop, kContentW, 96, L"Rato");
   int y = kContentTop + 44;
   label(h, L"", x, y + 4, 210, 22, nullptr, kMouseText);
   slider(h, kMouse, x + 214, y, 300, 10, 500, (int)std::lround(c.mouse_sensitivity * 100));
   set_text(h, kMouseText, L"Sensibilidade do rato: %.2f", c.mouse_sensitivity);
   check(h, L"Inverter eixo Y", kInvertY, x + 560, y + 2, 220, c.invert_y);
   const int top = kContentTop + 106;
-  panel(2, kContentLeft, top, kContentW, 416, L"Teclas (clique e prima a nova tecla ou botão do rato; Esc cancela)");
+  panel(3, kContentLeft, top, kContentW, 416, L"Teclas (clique e prima a nova tecla ou botão do rato; Esc cancela)");
   const int per_col = (keybinds::kActionCount + 1) / 2, row = 28;
   for (int a = 0; a < keybinds::kActionCount; a++) {
     const int col = a / per_col, r = a % per_col;
@@ -257,10 +351,10 @@ void build_controls(HWND h) {
 }
 
 void build_multiplayer(HWND h) {
-  g_build_tab = 3;
+  g_build_tab = 4;
   const int w = (kContentW - 14) / 2, xa = kContentLeft, xb = kContentLeft + w + 14, top = kContentTop, ph = 280;
-  panel(3, xa, top, w, ph, L"1. Criar Partida (Anfitrião)");
-  panel(3, xb, top, w, ph, L"2. Entrar numa Partida (Convidado)");
+  panel(4, xa, top, w, ph, L"1. Criar Partida (Anfitrião)");
+  panel(4, xb, top, w, ph, L"2. Entrar numa Partida (Convidado)");
   int y = top + 42;
   button(h, L"Gerar Sala Co-op", kCreateRoom, xa + 16, y, w - 32, 34);
   y += 44;
@@ -279,8 +373,8 @@ void build_multiplayer(HWND h) {
   button(h, L"Desligar", kDisconnect, xb + w - 136, y, 120, 32);
 
   const int sy = top + ph + 12;
-  panel(3, xa, sy, w, 186, L"Estado em tempo real");
-  panel(3, xb, sy, w, 186, L"Como jogar");
+  panel(4, xa, sy, w, 186, L"Estado em tempo real");
+  panel(4, xb, sy, w, 186, L"Como jogar");
   label(h, L"", xa + 16, sy + 40, w - 32, 24, g_bold, kNetState);
   label(h, L"", xa + 16, sy + 70, w - 32, 70, nullptr, kNetDetail);
   label(h, L"Passo 1: Conecte com o seu amigo aqui no F8.\n\nPasso 2: No menu do jogo, escolha Campaign ou Versus → System Link.\n\n"
@@ -303,12 +397,14 @@ void build(HWND h) {
   for (auto& v : g_controls) v.clear();
   g_panels.clear();
   build_video(h);
+  build_advanced(h);
   build_audio(h);
   build_controls(h);
   build_multiplayer(h);
   g_build_tab = -1;
   ShowWindow(GetDlgItem(h, kClose), g_embedded ? SW_HIDE : SW_SHOW);
   for (int t = 0; t < kTabs; t++) ShowWindow(GetDlgItem(h, kTabFirst + t), SW_SHOW);
+  sync_controls(h);
   update_preview(h);
   g_shown_code.clear();
   update_network(h);
@@ -346,7 +442,7 @@ void paint(HWND h) {
     SelectObject(dc, g_bold);
     SetTextColor(dc, kText);
     RECT t{p.x + 18, p.y + 8, p.x + p.w - 10, p.y + 34};
-    DrawTextW(dc, p.title, -1, &t, DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(dc, p.title, -1, &t, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
   }
   SelectObject(dc, old_pen);
   DeleteObject(pen);
@@ -440,12 +536,36 @@ void command(HWND h, int id, int code) {
     update_key_labels(h);
   } else if (id == kScale && code == CBN_SELCHANGE) {
     const LRESULT i = SendDlgItemMessageW(h, kScale, CB_GETCURSEL, 0, 0);
-    if (i >= 0 && i < 4) c.resolution_scale = kScales[i];
+    if (i >= 0 && i < kScaleCount) c.resolution_scale = kScales[i];
+    mark_custom(h);
     config::save();
     update_preview(h);
+  } else if (id == kPreset && code == CBN_SELCHANGE) {
+    const LRESULT i = SendDlgItemMessageW(h, kPreset, CB_GETCURSEL, 0, 0);
+    if (i >= 0 && i < config::kPresetCount) {
+      config::apply_preset(c, (int)i, gpu::render::raytracing_tier() >= 11);
+      config::save();
+      sync_controls(h);
+      update_preview(h);
+      SetDlgItemTextW(h, kPresetNote, L"Aplicado.");
+    }
+  } else if (id == kAniso && code == CBN_SELCHANGE) {
+    const LRESULT i = SendDlgItemMessageW(h, kAniso, CB_GETCURSEL, 0, 0);
+    if (i >= 0 && i < 5) c.anisotropy = kAnisoChoices[i];
+    mark_custom(h);
+    config::save();
+  } else if ((id == kGtao || id == kGi || id == kSsr || id == kHalfRes || id == kFp16 || id == kTonemap || id == kDxr ||
+              id == kZeroCopy) && code == BN_CLICKED) {
+    const bool on = IsDlgButtonChecked(h, id) == BST_CHECKED;
+    bool& v = id == kGtao ? c.gtao : id == kGi ? c.ssrtgi : id == kSsr ? c.ssr : id == kHalfRes ? c.ss_half_res
+              : id == kFp16 ? c.fp16_targets : id == kTonemap ? c.tonemap : id == kDxr ? c.raytracing : c.zero_copy;
+    v = on;
+    mark_custom(h);
+    config::save();
   } else if (id == kFpsLimit && code == CBN_SELCHANGE) {
     const LRESULT i = SendDlgItemMessageW(h, kFpsLimit, CB_GETCURSEL, 0, 0);
     if (i >= 0 && i < 4) c.fps_limit = kFpsChoices[i];
+    mark_custom(h);
     config::save();
   } else if (id == kLanguage && code == CBN_SELCHANGE) {
     int count = 0;
@@ -464,12 +584,14 @@ void command(HWND h, int id, int code) {
     update_preview(h);
   } else if (id == kFsr && code == BN_CLICKED) {
     c.sharpening = IsDlgButtonChecked(h, kFsr) == BST_CHECKED;
+    mark_custom(h);
     config::save();
   } else if (id == kVsync && code == BN_CLICKED) {
     c.vsync = IsDlgButtonChecked(h, kVsync) == BST_CHECKED;
     config::save();
   } else if (id == kAdaptiveFps && code == BN_CLICKED) {
     c.adaptive_fps = IsDlgButtonChecked(h, kAdaptiveFps) == BST_CHECKED;
+    mark_custom(h);
     config::save();
   } else if (id == kInvertY && code == BN_CLICKED) {
     c.invert_y = IsDlgButtonChecked(h, kInvertY) == BST_CHECKED;
@@ -533,7 +655,9 @@ LRESULT CALLBACK menu_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         text = phase == net::MenuState::kConnected ? kGreen : phase == net::MenuState::kWaiting ? kAmber : kDim;
       } else if (id == kCopyFeedback) {
         text = kGreen;
-      } else if (id == kLanguageNote || id == kKeysNote) {
+      } else if (id == kDxrNote) {
+        text = gpu::render::raytracing_tier() >= 11 ? kGreen : kAmber;
+      } else if (id == kLanguageNote || id == kKeysNote || id == kPresetNote) {
         text = kAmber;
       } else if (id == kScalePreview) {
         text = kDim;
@@ -558,12 +682,19 @@ LRESULT CALLBACK menu_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       if (id == kStrength) {
         c.sharpening_strength = pos / 100.0f;
         set_text(h, kStrengthText, L"Força do FSR: %.2f", c.sharpening_strength);
+        mark_custom(h);
       } else if (id == kMouse) {
         c.mouse_sensitivity = pos / 100.0f;
         set_text(h, kMouseText, L"Sensibilidade do rato: %.2f", c.mouse_sensitivity);
       } else if (id == kVolume) {
         c.volume = pos / 100.0f;
         set_text(h, kVolumeText, L"Volume geral: %.0f%%", c.volume * 100);
+      } else if (id == kGtaoLevel || id == kGiLevel || id == kSsrLevel || id == kVibrance) {
+        float& v = id == kGtaoLevel ? c.gtao_intensity : id == kGiLevel ? c.ssrtgi_intensity : id == kSsrLevel ? c.ssr_intensity : c.vibrance;
+        v = pos / 100.0f;
+        set_text(h, id == kGtaoLevel ? kGtaoText : id == kGiLevel ? kGiText : id == kSsrLevel ? kSsrText : kVibranceText,
+                 id == kVibrance ? L"Vibrância: %.0f%%" : L"Intensidade: %.0f%%", pos);
+        mark_custom(h);
       }
       if (LOWORD(wp) == SB_ENDSCROLL) config::save();
       return 0;
