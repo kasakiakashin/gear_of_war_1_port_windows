@@ -113,6 +113,9 @@ struct Texture {
   bool cube = false;  // 6 fatias vistas como TextureCube
   bool depth_copy = false;  // cópia R32_FLOAT de um resolve de profundidade (fetch k_24_8 / k_24_8_FLOAT)
   uint64_t serial = 0;                      // destinos de resolve: ordem da última escrita
+  bool read = true;  // destinos de resolve: amostrada desde a última cópia (estatística do zero-copy)
+  uint16_t pend_src = 0;  // cópias de resolve adiadas que leem deste RT (ZeroCopyResolves)
+  bool pend_dst = false;  // este destino de resolve tem uma cópia adiada por fazer
 };
 
 struct RtKey {
@@ -299,6 +302,7 @@ struct Renderer {
   std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, Texture> textures;
   Texture dummy, dummy_cube;
   Texture fsr_tmp;  // saída do EASU, entrada do RCAS
+  Texture grade_tmp;  // imagem final com a curva fílmica / vibrância (Tonemap, Vibrance)
   std::map<uint32_t, Texture> cubes;  // cube maps por endereço base
   std::vector<uint32_t> vs_ucode, ps_ucode;
   uint64_t vs_hash = 0, ps_hash = 0;
@@ -427,7 +431,16 @@ void transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D12_RESOURCE_ST
   g.list->ResourceBarrier(1, &b);
   cur = to;
 }
-void transition(Texture& t, D3D12_RESOURCE_STATES to) { transition(t.res, t.state, to); }
+// ZeroCopyResolves: um resolve não copia logo; a cópia fica pendente até o destino ser lido (transição para leitura) ou a fonte
+// ir ser reescrita (transição para RT/profundidade). Se o mesmo destino for resolvido outra vez antes disso, a cópia antiga não se
+// faz. Todas as leituras e escritas de texturas passam por transition(Texture&), por isso é aí que as pendentes se resolvem.
+void flush_pending_src(Texture* src);
+void flush_pending_dst(Texture* dst);
+void transition(Texture& t, D3D12_RESOURCE_STATES to) {
+  if (t.pend_src && (to == D3D12_RESOURCE_STATE_RENDER_TARGET || to == D3D12_RESOURCE_STATE_DEPTH_WRITE)) flush_pending_src(&t);
+  if (t.pend_dst) flush_pending_dst(&t);
+  transition(t.res, t.state, to);
+}
 
 void wait_fence(uint64_t value) {
   if (g.fence->GetCompletedValue() < value) {
@@ -945,6 +958,7 @@ Texture* render_target_slow(uint32_t base, uint32_t xe_format, uint32_t pitch, b
   constexpr uint32_t kMaxTexture = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
   uint32_t h = std::min(scaled((float)logical_h), kMaxTexture);
   if (t.res && t.height >= h) return &t;
+  if (t.pend_src) flush_pending_src(&t);
   if (t.res) g.garbage.push_back(t.res), t.res = nullptr;  // recriado maior (conteúdo perdido)
   forget_recent_rts();  // outra chave com a mesma superfície pode ter guardado uma altura menor
   if (!create_texture(t, std::min(scaled((float)std::min<uint32_t>(pitch, 8192)), kMaxTexture), h, f, !depth, depth)) return nullptr;
@@ -1094,6 +1108,13 @@ bool create_roots() {
       // opt.y: 1 = profundidade em cinzento (capturas), 2 = D24S8 empacotado como 8888 (stencil no byte baixo,
       // profundidade nos 24 bits altos), como o Xenos escreve um resolve de profundidade.
       // opt.y = 3: EASU, opt.y = 4: RCAS (FSR 1.0; ver kFsr).
+      // opt.y = 5: vibrância (opt.w), 6: curva fílmica suave + vibrância, sobre a imagem final já em LDR.
+      "  if (opt.y > 4.5) {\n"
+      "    float3 x = saturate(c.rgb);\n"
+      "    if (opt.y > 5.5) x = lerp(x, x * x * (3.0 - 2.0 * x), 0.3);\n"
+      "    float l = dot(x, float3(0.2126, 0.7152, 0.0722)), sat = max(x.r, max(x.g, x.b)) - min(x.r, min(x.g, x.b));\n"
+      "    return float4(saturate(lerp(l.xxx, x, 1.0 + opt.w * (1.0 - sat))), 1.0);\n"
+      "  }\n"
       "  if (opt.y > 3.5) return xe_rcas(pos.xy, opt.w);\n"
       "  if (opt.y > 2.5) return xe_easu(uv);\n"
       "  if (opt.y > 1.5) { uint d = (uint)(saturate(c.r) * 16777215.0 + 0.5);\n"
@@ -1135,7 +1156,7 @@ ID3D12PipelineState* blit_pipeline(DXGI_FORMAT f) {
 
 // Copia src[sx..sx+w, sy..sy+h] para dst (viewport dx, dy, dw, dh), com escala e filtro opcional.
 // depth_mode: 0 = cor (× color_scale), 1 = profundidade em cinzento, 2 = profundidade empacotada D24S8.
-enum DepthMode { kColor = 0, kDepthGray = 1, kDepthPacked = 2, kColorEasu = 3, kColorRcas = 4 };
+enum DepthMode { kColor = 0, kDepthGray = 1, kDepthPacked = 2, kColorEasu = 3, kColorRcas = 4, kColorVibrance = 5, kColorFilmic = 6 };
 void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_state, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
           DXGI_FORMAT dst_format, float sx, float sy, float sw, float sh, float dx, float dy, float dw, float dh,
           bool linear, int depth_mode, bool opaque, float color_scale = 1.0f, uint32_t swizzle = kSwizzleIdentity) {
@@ -1162,6 +1183,39 @@ void blit(Texture& src, ID3D12Resource* dst_res, D3D12_RESOURCE_STATES& dst_stat
   g.list->DrawInstanced(3, 1, 0, 0);
 }
 
+struct PendingCopy {
+  Texture *src, *dst;
+  DXGI_FORMAT format;
+  float sx, sy, sw, sh, dy, scale;
+  int mode;
+  uint32_t swizzle;
+};
+std::vector<PendingCopy> g_pending;
+uint32_t g_zc_saved = 0, g_zc_done = 0;  // cópias evitadas / feitas mais tarde (relatório de 120 frames)
+
+void run_pending(size_t i) {
+  const PendingCopy c = g_pending[i];
+  g_pending.erase(g_pending.begin() + (ptrdiff_t)i);
+  c.src->pend_src--;
+  c.dst->pend_dst = false;
+  blit(*c.src, c.dst->res, c.dst->state, c.dst->rtv, c.format, c.sx, c.sy, c.sw, c.sh, 0, c.dy, c.sw, c.sh, false, c.mode, false,
+       c.scale, c.swizzle);
+  g_zc_done++;
+}
+void flush_pending_src(Texture* src) {
+  for (size_t i = 0; i < g_pending.size();)
+    if (g_pending[i].src == src) run_pending(i);
+    else i++;
+}
+void flush_pending_dst(Texture* dst) {
+  for (size_t i = 0; i < g_pending.size();)
+    if (g_pending[i].dst == dst) run_pending(i);
+    else i++;
+}
+void flush_all_pending() {
+  while (!g_pending.empty()) run_pending(0);
+}
+
 // ---- Shaders ----
 // Compilação FXC em threads de fundo: o FXC demora de 50 ms a vários segundos por shader e parava o processador de
 // comandos ao entrar em áreas novas. A maior parte fica pronta antes de ser precisa (shader_scan_thread). Um desenho cujo shader
@@ -1180,6 +1234,283 @@ std::deque<CompileJob> g_compile_jobs;
 std::atomic<uint32_t> g_compiles_pending{0};
 std::atomic<uint32_t> g_prebuild_left{0};  // pré-compilações por fazer
 std::atomic<uint64_t> g_prebuild_done{0}, g_prebuild_found{0}, g_demand_compiles{0};
+uint32_t g_aniso_samplers = 0;  // samplers anisotrópicos montados por desenho (relatório de 120 frames)
+uint32_t g_rs_read = 0, g_rs_unread = 0;  // cópias de resolve lidas / reescritas sem leitura (zero-copy)
+uint32_t g_fx_passes = 0;  // passes de GTAO/SSRTGI/SSR
+
+// ---- Efeitos de espaço de ecrã (GTAO, SSRTGI de 1 rebote, SSR) ----
+// Aplicados ao RT da cena HDR (16F) no 1.º resolve de cor de ecrã inteiro depois do resolve de profundidade do frame (no
+// corredor: r09, a cena iluminada, antes da translucidez, do bloom/DOF/tonemap e do HUD). O jogo não dá normais nem a matriz
+// de projeção: a profundidade é invertida (d = perto / z, céu = 0), por isso z = 1 / d em unidades do plano próximo, e as normais
+// vêm das diferenças da posição reconstruída com um FOV horizontal de 70°. Passes: cópia da região → efeitos (meia ou inteira
+// resolução, RGBA16F: rgb = luz indireta + reflexo a somar, a = visibilidade) → composição com filtro bilateral 3×3 no RT.
+static const char kFxHlsl[] = R"(
+cbuffer C : register(b0) { float4 c0, c1, c2, c3; };
+// c0: origem da região no RT (px internos), tamanho da região; c1: origem da região no ecrã, tamanho do ecrã (px internos)
+// c2: tan(FOV/2) x/y, fator de redução (1 ou 2), máximo do RT (0 = sem limite); c3: intensidades AO/GI/SSR, efeitos (bits 1/2/4)
+Texture2D<float4> col : register(t0);
+Texture2D<float> dep : register(t1);
+Texture2D<float4> fxb : register(t2);
+float zlin(float d) { return 1.0 / max(d, 1e-6); }
+float depth_at(float2 p) { return dep.Load(int3(int2(clamp(p, 0.0, c0.zw - 1.0) + c0.xy), 0)); }
+float3 vpos_d(float2 p, float d) {
+  float2 s = (p + 0.5 + c1.xy) / c1.zw;
+  float z = zlin(d);
+  return float3(float2(s.x * 2.0 - 1.0, 1.0 - s.y * 2.0) * c2.xy * z, z);
+}
+float3 vpos(float2 p) { return vpos_d(p, depth_at(p)); }
+float3 normal_at(float2 p, float3 P) {
+  float3 l = vpos(p - float2(1, 0)), r = vpos(p + float2(1, 0)), u = vpos(p - float2(0, 1)), d = vpos(p + float2(0, 1));
+  float3 dx = abs(r.z - P.z) < abs(P.z - l.z) ? r - P : P - l;
+  float3 dy = abs(d.z - P.z) < abs(P.z - u.z) ? d - P : P - u;
+  float3 n = normalize(cross(dx, dy));
+  return dot(n, -P) < 0.0 ? -n : n;
+}
+float2 to_px(float3 Q) {
+  float2 s = float2(Q.x / (Q.z * c2.x) * 0.5 + 0.5, 0.5 - Q.y / (Q.z * c2.y) * 0.5);
+  return s * c1.zw - c1.xy - 0.5;
+}
+float acos_fast(float x) { x = clamp(x, -1.0, 1.0); float r = -0.156583 * abs(x) + 1.570796; r *= sqrt(1.0 - abs(x)); return x >= 0 ? r : 3.141593 - r; }
+float4 effects(float4 pos : SV_Position) : SV_Target {
+  const float PI = 3.141593, HALF_PI = 1.570796;
+  float2 p = (pos.xy - 0.5) * c2.z + 0.5 * (c2.z - 1.0);
+  float d0 = depth_at(p);
+  if (d0 <= 1e-5) return float4(0, 0, 0, 1);  // céu
+  float3 P = vpos_d(p, d0), V = normalize(-P), N = normal_at(p, P);
+  uint flags = (uint)c3.w & 0xFF;
+  float noise = frac(52.9829189 * frac(0.06711056 * pos.x + 0.00583715 * pos.y));
+  // Raio de 6 unidades do plano próximo (UE3: ~60 unidades), em píxeis; nada a mais de 400.
+  const float R = 6.0;
+  float projR = min(R / (P.z * c2.x) * 0.5 * c1.z, 0.15 * c1.z);
+  float fade = saturate((400.0 - P.z) / 100.0);
+  float vis = 1.0;
+  float3 gi = 0;
+  if ((flags & 3) && projR > 1.0 && fade > 0.0) {
+    const int DIRS = c2.z > 1.5 ? 3 : 2, STEPS = 6;
+    const float fr = 0.615 * R, fmul = -1.0 / fr, fadd = (R - fr) / fr + 1.0;
+    vis = 0;
+    float gw = 0;
+    for (int i = 0; i < DIRS; i++) {
+      float phi = (i + noise) * PI / DIRS;
+      float2 omega = float2(cos(phi), -sin(phi));
+      float3 dirv = float3(omega.x, -omega.y, 0);
+      float3 ortho = dirv - dot(dirv, V) * V;
+      float3 axis = normalize(cross(ortho, V));
+      float3 pn = N - axis * dot(N, axis);
+      float pnl = max(length(pn), 1e-4);
+      float cn = saturate(dot(pn, V) / pnl);
+      float n = (dot(ortho, pn) < 0 ? -1.0 : 1.0) * acos_fast(cn);
+      float hc0 = cos(n + HALF_PI), hc1 = cos(n - HALF_PI);
+      float lo0 = hc0, lo1 = hc1;
+      for (int j = 0; j < STEPS; j++) {
+        float s = (j + frac(noise + j * 0.618034)) / STEPS;
+        s = s * s + 1.0 / projR;
+        float2 off = omega * s * projR;
+        [unroll] for (int side = 0; side < 2; side++) {
+          float2 q = side ? p - off : p + off;
+          float3 Q = vpos(q), dv = Q - P;
+          float dist = length(dv);
+          float3 hv = dv / max(dist, 1e-4);
+          float w = saturate(dist * fmul + fadd);
+          float shc = lerp(side ? lo1 : lo0, dot(hv, V), w);
+          float prev = side ? hc1 : hc0;
+          if ((flags & 2) && shc > prev) {  // amostra que sobe o horizonte: superfície visível a emitir a sua cor
+            float cosn = saturate(dot(N, hv));
+            float3 L = col.Load(int3(int2(clamp(q, 0.0, c0.zw - 1.0)), 0)).rgb;
+            gi += L * cosn * w * (shc - prev);
+            gw += 1.0;
+          }
+          if (side) hc1 = max(hc1, shc); else hc0 = max(hc0, shc);
+        }
+      }
+      float h0 = -acos_fast(hc1), h1 = acos_fast(hc0);
+      h0 = n + clamp(h0 - n, -HALF_PI, HALF_PI);
+      h1 = n + clamp(h1 - n, -HALF_PI, HALF_PI);
+      float sn = sin(n);
+      float a0 = (cn + 2.0 * h0 * sn - cos(2.0 * h0 - n)) * 0.25, a1 = (cn + 2.0 * h1 * sn - cos(2.0 * h1 - n)) * 0.25;
+      vis += pnl * (a0 + a1);
+    }
+    vis = saturate(vis / DIRS);
+    gi *= 2.0 / DIRS;
+  }
+  float ao = (flags & 1) ? lerp(1.0, vis * vis, c3.x * fade) : 1.0;
+  float3 C = col.Load(int3(int2(clamp(p, 0.0, c0.zw - 1.0)), 0)).rgb;
+  float3 add = 0;
+  if (flags & 2) {  // a cor do píxel como albedo aproximado (só a cromaticidade)
+    float3 alb = C / max(max(C.r, max(C.g, C.b)), 0.05) * 0.5;
+    add += gi * alb * c3.y * fade;
+  }
+  if ((flags & 4) && fade > 0.0) {
+    float3 Rv = reflect(-V, N);
+    float F = 0.04 + 0.96 * pow(1.0 - saturate(dot(N, V)), 5.0);
+    float t = 0.05 * P.z, hit = 0;
+    float3 Q = P + N * (0.02 * P.z);
+    float2 hp = 0;
+    [loop] for (int k = 0; k < 16 && hit == 0.0; k++) {
+      float3 X = Q + Rv * t;
+      if (X.z <= 0.05) break;
+      float2 px = to_px(X);
+      if (any(px < 0.0) || any(px > c0.zw - 1.0)) break;
+      float sz = zlin(depth_at(px));
+      if (X.z > sz && X.z - sz < 0.15 * X.z + 1.0) { hit = 1.0 - k / 16.0; hp = px; }
+      t *= 1.35;
+    }
+    if (hit > 0.0) {
+      float2 e = min(hp, c0.zw - 1.0 - hp) / (0.08 * c0.zw);
+      float ef = saturate(min(e.x, e.y));
+      float3 H = col.Load(int3(int2(hp), 0)).rgb;
+      add += (H - C) * saturate(F * 2.5) * c3.z * hit * ef * fade;
+    }
+  }
+  return float4(add, ao);
+}
+float4 composite(float4 pos : SV_Position) : SV_Target {
+  float2 p = pos.xy - c0.xy - 0.5;  // píxel na região
+  float4 C = col.Load(int3(int2(p), 0));
+  float z = zlin(depth_at(p));
+  uint fw, fh;
+  fxb.GetDimensions(fw, fh);
+  float2 f = (p + 0.5) / c2.z - 0.5;
+  int2 b = int2(floor(f + 0.5));
+  float4 acc = 0;
+  float wsum = 0;
+  [unroll] for (int y = -1; y <= 1; y++) [unroll] for (int x = -1; x <= 1; x++) {
+    int2 q = clamp(b + int2(x, y), int2(0, 0), int2(fw - 1, fh - 1));
+    float2 fp = (q + 0.5) * c2.z - 0.5 * (c2.z - 1.0) - 0.5;
+    float zq = zlin(depth_at(fp + 0.5 * (c2.z - 1.0)));
+    float2 dd = f - q;
+    float w = exp(-dot(dd, dd) * 0.8) / (0.02 + abs(zq - z) / max(z, 1e-3));
+    acc += fxb.Load(int3(q, 0)) * w;
+    wsum += w;
+  }
+  float4 fx = acc / max(wsum, 1e-5);
+  float3 o = max(C.rgb * fx.a + fx.rgb, 0.0);
+  uint dbg = (uint)c3.w >> 8;  // GOW_FX_DEBUG: 1 = visibilidade (AO), 2 = luz somada (GI + SSR) × 4
+  if (dbg == 1) o = fx.aaa;
+  else if (dbg == 2) o = abs(fx.rgb) * 4.0;
+  if (c2.w > 0.0) o = min(o, c2.w);
+  return float4(o, C.a);
+}
+)";
+
+struct FxState {
+  bool tried = false, ok = false;
+  ID3D12RootSignature* root = nullptr;
+  ID3D12PipelineState* pso[2] = {};  // efeitos, composição
+  Texture color, buf;
+  bool after_depth = false;  // houve um resolve de profundidade de ecrã inteiro neste frame (ou tile) desde a última aplicação
+};
+FxState g_fx;
+
+bool fx_init() {
+  if (g_fx.tried) return g_fx.ok;
+  g_fx.tried = true;
+  D3D12_ROOT_PARAMETER rp[2] = {};
+  rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  rp[0].Constants = {0, 0, 16};
+  rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  D3D12_DESCRIPTOR_RANGE range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0, 0};
+  rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  rp[1].DescriptorTable = {1, &range};
+  rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  D3D12_ROOT_SIGNATURE_DESC rd{2, rp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  ID3DBlob *blob = nullptr, *err = nullptr;
+  if (FAILED(g.serialize_rs(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err)) ||
+      FAILED(g.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g_fx.root)))) {
+    std::fprintf(stderr, "[fx] root signature falhou\n");
+    return false;
+  }
+  blob->Release();
+  const char* entry[2] = {"effects", "composite"};
+  for (int i = 0; i < 2; i++) {
+    std::string e;
+    ID3DBlob* ps = compile_hlsl(std::string("#define ") + entry[i] + " main\n" + kFxHlsl, "ps_5_0", entry[i], &e);
+    if (!ps) {
+      std::fprintf(stderr, "[fx] shader %s: %s\n", entry[i], e.c_str());
+      return false;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
+    d.pRootSignature = g_fx.root;
+    d.VS = {g.blit_vs->GetBufferPointer(), g.blit_vs->GetBufferSize()};
+    d.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    d.SampleMask = ~0u;
+    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    d.RasterizerState.DepthClipEnable = TRUE;
+    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    d.NumRenderTargets = 1;
+    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    d.SampleDesc.Count = 1;
+    if (FAILED(g.device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_fx.pso[i])))) {
+      std::fprintf(stderr, "[fx] PSO %s falhou\n", entry[i]);
+      ps->Release();
+      return false;
+    }
+    ps->Release();
+  }
+  std::fprintf(stderr, "[fx] efeitos de ecrã prontos\n");
+  return g_fx.ok = true;
+}
+
+void fx_pass(int which, float vx, float vy, float vw, float vh, const D3D12_CPU_DESCRIPTOR_HANDLE& rtv, const Texture& t0,
+             const Texture& t1, const Texture& t2, const float c[16]) {
+  const uint32_t slot = srv_alloc(3);
+  write_srv(t0, slot);
+  write_srv(t1, slot + 1);
+  write_srv(t2, slot + 2);
+  g.list->SetPipelineState(g_fx.pso[which]);
+  g.list->SetGraphicsRootSignature(g_fx.root);
+  g.list->SetGraphicsRoot32BitConstants(0, 16, c, 0);
+  g.list->SetGraphicsRootDescriptorTable(1, gpu_handle(g.srv_heap, g.srv_inc, slot));
+  g.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+  D3D12_VIEWPORT vp{vx, vy, vw, vh, 0, 1};
+  D3D12_RECT sc{(LONG)vx, (LONG)vy, (LONG)(vx + vw), (LONG)(vy + vh)};
+  g.list->RSSetViewports(1, &vp);
+  g.list->RSSetScissorRects(1, &sc);
+  g.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  g.list->DrawInstanced(3, 1, 0, 0);
+}
+
+// Região (sx, sy, w, h) do RT em coordenadas lógicas da EDRAM; (x, y) a mesma região no ecrã.
+void fx_apply(Texture& scene, Texture& depth, float sx, float sy, float w, float h, float x, float y) {
+  const config::Config& cfg = config::get();
+  if (!fx_init()) return;
+  Phase ph("efeitos de ecrã");
+  const float S = g.scale;
+  const uint32_t rw = (uint32_t)std::lround(w * S), rh = (uint32_t)std::lround(h * S);
+  const uint32_t k = cfg.ss_half_res ? 2 : 1, bw = (rw + k - 1) / k, bh = (rh + k - 1) / k;
+  if (!rw || !rh) return;
+  if (!g_fx.color.res || g_fx.color.width != rw || g_fx.color.height != rh) {
+    if (g_fx.color.res) g.garbage.push_back(g_fx.color.res), g_fx.color.res = nullptr;
+    if (!create_texture(g_fx.color, rw, rh, DXGI_FORMAT_R16G16B16A16_FLOAT, true, false)) return;
+  }
+  if (!g_fx.buf.res || g_fx.buf.width != bw || g_fx.buf.height != bh) {
+    if (g_fx.buf.res) g.garbage.push_back(g_fx.buf.res), g_fx.buf.res = nullptr;
+    if (!create_texture(g_fx.buf, bw, bh, DXGI_FORMAT_R16G16B16A16_FLOAT, true, false)) return;
+  }
+  const float ox = std::round(sx * S), oy = std::round(sy * S);
+  blit(scene, g_fx.color.res, g_fx.color.state, g_fx.color.rtv, DXGI_FORMAT_R16G16B16A16_FLOAT, ox, oy, (float)rw, (float)rh, 0, 0,
+       (float)rw, (float)rh, false, kColor, false);
+  constexpr float kTanX = 0.7002075f;  // tan(35°): FOV horizontal de 70°
+  const float rt_max = cfg.fp16_targets ? 0.0f : 31.875f;
+  static const uint32_t debug = std::getenv("GOW_FX_DEBUG") ? (uint32_t)std::atoi(std::getenv("GOW_FX_DEBUG")) : 0;
+  const uint32_t flags = (cfg.gtao ? 1u : 0u) | (cfg.ssrtgi ? 2u : 0u) | (cfg.ssr ? 4u : 0u) | debug << 8;
+  const float c[16] = {ox, oy, (float)rw, (float)rh, std::round(x * S), std::round(y * S), std::round(kWidth * S),
+                       std::round(kHeight * S), kTanX, kTanX * kHeight / kWidth, (float)k, rt_max, cfg.gtao_intensity,
+                       cfg.ssrtgi_intensity, cfg.ssr_intensity, (float)flags};
+  transition(g_fx.color, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  transition(depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  transition(g_fx.buf, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  transition(g.dummy, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  invalidate_bound();
+  fx_pass(0, 0, 0, (float)bw, (float)bh, g_fx.buf.rtv, g_fx.color, depth, g.dummy, c);
+  transition(g_fx.buf, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  fx_pass(1, ox, oy, (float)rw, (float)rh, scene.rtv, g_fx.color, depth, g_fx.buf, c);
+  invalidate_bound();
+  g_fx_passes++;
+}
 
 void finish_compile(Compiled& c, const std::string& name, const std::filesystem::path& cache_file,
                     const std::vector<uint32_t>& u, std::string err, ULONGLONG dt) {
@@ -2036,6 +2367,17 @@ void resolve() {
   Texture* src = depth ? render_target(dinfo & 0xFFF, 0, pitch, true, (uint32_t)sy1)
                        : render_target(cinfo & 0xFFF, (cinfo >> 16) & 0xF, pitch, false, (uint32_t)sy1);
   if (!src) return;
+  // GTAO / SSRTGI / SSR: na cena HDR, no 1.º resolve de cor 16F de ecrã inteiro depois do resolve da profundidade da cena (no
+  // tile atual, se o modo exato estiver ativo). Antes do resolve, para a cópia (e a translucidez desenhada a seguir) já os terem.
+  if (depth && x1 - x0 >= 1200.0f) {
+    g_fx.after_depth = true;
+  } else if (!depth && g_fx.after_depth && x1 - x0 >= 1200.0f && y1 - y0 >= 64.0f && src->format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+    g_fx.after_depth = false;
+    const config::Config& fc = config::get();
+    if (fc.gtao || fc.ssrtgi || fc.ssr)
+      if (Texture* dt = render_target(dinfo & 0xFFF, 0, pitch, true, (uint32_t)sy1))
+        fx_apply(*src, *dt, sx0, sy0, sx1 - sx0, sy1 - sy0, x0, y0);
+  }
   if (g.dump_resolves && g.dump_frames.count(g.frame) && sx1 > sx0 && sy1 > sy0) {  // GOW_DUMP_RESOLVES=1
     Texture tmp;
     uint32_t w = (uint32_t)(sx1 - sx0), h = (uint32_t)(sy1 - sy0);
@@ -2094,19 +2436,47 @@ void resolve() {
           break;
         }
       }
+      if (t && t->pend_dst) flush_pending_dst(t);  // continuação (2.º tile) de uma cópia ainda pendente
       if (!t) {
         t = &g.resolved[{dphys, (uint32_t)tf}];
+        if (t->pend_dst) {
+          // Resolvido outra vez sem ter sido lido: a cópia pendente (do mesmo sítio, da altura inteira) já não é precisa.
+          bool dropped = false;
+          for (size_t i = 0; i < g_pending.size(); i++)
+            if (g_pending[i].dst == t) {
+              if (row == 0 && g_pending[i].dy == 0 && g_pending[i].sw <= w * g.scale && g_pending[i].sh <= h * g.scale) {
+                g_pending[i].src->pend_src--;
+                g_pending.erase(g_pending.begin() + (ptrdiff_t)i);
+                t->pend_dst = false;
+                g_zc_saved++;
+                dropped = true;
+              }
+              break;
+            }
+          if (!dropped) flush_pending_dst(t);
+        }
         if (t->res && (t->width < tw || t->height < th)) g.garbage.push_back(t->res), t->res = nullptr;
         if (!t->res && !create_texture(*t, tw, th, tf, true, false)) t = nullptr;
         if (t) t->guest_pitch = dest_pitch, t->guest_bpp = bpp, t->depth_copy = is_depth_copy;
       }
       if (!t) return;
       const float S = g.scale;
-      blit(*src, t->res, t->state, t->rtv, tf, sx0 * S, sy0 * S, w * S, h * S, 0, (float)scaled((float)row), w * S, h * S, false,
-           mode, false, std::ldexp(1.0f, bias),
-           !depth && ((info >> 24) & 1) ? kSwizzleSwapRB : kSwizzleIdentity);  // copy_dest_swap
+      const uint32_t swz = !depth && ((info >> 24) & 1) ? kSwizzleSwapRB : kSwizzleIdentity;  // copy_dest_swap
+      const bool defer = config::get().zero_copy && !g.resolve_to_memory && !(g.dump_resolves && g.dump_frames.count(g.frame)) &&
+                         !t->pend_dst && src->pend_src < 64;
+      if (defer) {
+        g_pending.push_back({src, t, tf, sx0 * S, sy0 * S, w * S, h * S, (float)scaled((float)row), std::ldexp(1.0f, bias), mode, swz});
+        src->pend_src++;
+        t->pend_dst = true;
+      } else {
+        blit(*src, t->res, t->state, t->rtv, tf, sx0 * S, sy0 * S, w * S, h * S, 0, (float)scaled((float)row), w * S, h * S, false,
+             mode, false, std::ldexp(1.0f, bias), swz);
+      }
       t->frame = g.frame;
       t->serial = ++g.resolve_serial;
+      if (t->read) g_rs_read++;
+      else g_rs_unread++;  // reescrita sem ter sido lida: esta cópia anterior foi trabalho perdido
+      t->read = false;
       if (g.resolve_to_memory && g.scale == 1.0f && !is_depth_copy && tf == (DXGI_FORMAT)fi.dxgi)
         queue_writeback(*t, row, w, h, dphys, dest_pitch, bpp, info & 7);
     };
@@ -2324,6 +2694,7 @@ bool init() {
   if (const char* e = std::getenv("GOW_TRACE_RENDER"); e && *e) g.trace = true, g.trace_frame = std::strtoull(e, nullptr, 10);
   g.active = init_device();
   if (g.active) start_pso_pool();
+  if (g.active) raytracing_tier();  // regista o suporte de DXR no log
   // Cache por preparar (sem launcher): a mesma preparação a partir dos pacotes do disco, em fundo. GOW_SCAN_MEMORY=1 junta o
   // varrimento do microcódigo na memória depois de cada carregamento.
   if (g.active && !std::getenv("GOW_NO_PREBUILD") && !shader_prep::up_to_date()) shader_prep::start();
@@ -2334,6 +2705,35 @@ bool init() {
 
 bool active() { return g.active; }
 const char* phase() { return g_phase.load(); }
+
+int raytracing_tier() {
+  static std::atomic<int> cached{-1};
+  if (const int v = cached.load(); v >= 0) return v;
+  int tier = 0;
+  if (const char* e = std::getenv("GOW_RT_TIER")) {  // testes do indicador do menu
+    tier = std::atoi(e);
+  } else {
+    ID3D12Device* dev = g.device;
+    bool own = false;
+    if (!dev) {  // launcher: antes do renderer existir, um dispositivo só para a pergunta
+      if (HMODULE m = LoadLibraryA("d3d12.dll")) {
+        auto create = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(reinterpret_cast<void*>(GetProcAddress(m, "D3D12CreateDevice")));
+        if (create && SUCCEEDED(create(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)))) own = true;
+        else dev = nullptr;
+      }
+    }
+    if (dev) {
+      D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
+      if (SUCCEEDED(dev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof o5)) &&
+          o5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED)
+        tier = (int)o5.RaytracingTier;  // 10 = DXR 1.0, 11 = DXR 1.1 (RayQuery)
+      if (own) dev->Release();
+    }
+  }
+  cached = tier;
+  std::fprintf(stderr, "[d3d12] ray tracing: %s\n", tier >= 11 ? "DXR 1.1" : tier == 10 ? "DXR 1.0 (sem RayQuery)" : "não suportado");
+  return tier;
+}
 void save_caches() {
   if (!g.active) return;
   save_pso_library();
@@ -2537,7 +2937,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
       st.blend[st.num_rt] = reg(i == 0 ? kRbBlendControl0 : kRbBlendControl1 + i - 1);
       rt_scale[i] = std::ldexp(1.0f, (int32_t)(info << 6) >> 26);
       const uint32_t xf = (info >> 16) & 0xF;
-      sys.rt_max[i] = xf == 3 || xf == 12 ? 31.875f : 0.0f;
+      sys.rt_max[i] = (xf == 3 || xf == 12) && !config::get().fp16_targets ? 31.875f : 0.0f;
       st.num_rt++;
       if (!first) first = t;
     }
@@ -2642,6 +3042,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
         for (uint32_t m = used_tex; m; m &= m - 1) {
           const uint32_t k = __builtin_ctz(m);
           transition(*dc.tex[k], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+          dc.tex[k]->read = true;
           std::memcpy(sys.tex_size[k], dc.size[k], sizeof dc.size[k]);
         }
       }
@@ -2680,12 +3081,22 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     }
     transition(*t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     slot_tex[k] = t;
+    t->read = true;
     D3D12_SAMPLER_DESC sd{};
     // Filtro da instrução tfetch, ou o da constante de fetch se a instrução o deixar a ela (3).
     const uint8_t ov = ps->info.tex_filter[k];
     const uint32_t mag = (ov & 3) != 3 ? ov & 3 : tf.mag_filter(), min = ((ov >> 2) & 3) != 3 ? (ov >> 2) & 3 : tf.min_filter(),
                    mip = ((ov >> 4) & 3) != 3 ? (ov >> 4) & 3 : tf.mip_filter();
     sd.Filter = (D3D12_FILTER)((min == 1 ? 0x10 : 0) | (mag == 1 ? 0x04 : 0) | (mip == 1 ? 0x01 : 0));
+    // Anisotrópico (AnisotropicFiltering) só em texturas 2D da memória com mips e filtro linear: nunca em cópias de resolve
+    // (mapas de sombra, profundidade, cena para o pós-processamento), cube maps, texturas sem mips ou com filtro de ponto.
+    if (const uint32_t aniso = (uint32_t)config::get().anisotropy;
+        aniso > 1 && min == 1 && mag == 1 && mip != 2 && t->mips > 1 && !t->cube && !t->guest_pitch && !t->depth_copy &&
+        !((ps->info.cube_mask >> k) & 1)) {
+      sd.Filter = D3D12_FILTER_ANISOTROPIC;
+      sd.MaxAnisotropy = aniso;
+      g_aniso_samplers++;
+    }
     sd.AddressU = address_mode(tf.clamp_x());
     sd.AddressV = address_mode(tf.clamp_y());
     sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -2701,7 +3112,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     if (!(used_tex & (1u << k))) continue;
     const D3D12_SAMPLER_DESC& sd = slot_smp[k];
     srv_key = srv_key * 0x100000001B3ull ^ (uint64_t)(uintptr_t)slot_tex[k]->res;
-    smp_key = smp_key * 0x100000001B3ull ^ (uint64_t)sd.Filter ^ (uint64_t)sd.AddressU << 12 ^ (uint64_t)sd.AddressV << 18;
+    smp_key = smp_key * 0x100000001B3ull ^ (uint64_t)sd.Filter ^ (uint64_t)sd.AddressU << 12 ^ (uint64_t)sd.AddressV << 18 ^
+              (uint64_t)sd.MaxAnisotropy << 24;
   }
   if (const uint32_t* e = g.srv_tables.find(srv_key)) {
     srv_base = *e;
@@ -2995,6 +3407,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   g.swaps++;
   g.tex_lookup.clear();
   g.desc_cache.clear();  // frame novo: a memória das texturas volta a ser verificada
+  g_fx.after_depth = false;
   // Ecrãs com poucos desenhos (título, carregamento) e shaders ainda a preparar (a preparação do launcher que continuou no jogo,
   // ou o varrimento da memória): espera aqui com uma barra no ecrã, em vez de entrar no nível com shaders em falta. Em jogo
   // nunca espera: o que falta compila em fundo e passa à frente quando um desenho o pede. GOW_NO_PREBUILD_WAIT=1 desliga.
@@ -3064,6 +3477,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
                  fb ? "cópia de resolve" : src && src != &g.dummy ? "memória" : "nada");
   }
   if (src && src != &g.dummy) {
+    src->read = true;
     // Cópia de resolve: tamanho interno; textura da memória: tamanho lógico.
     const float isc = src->guest_pitch ? g.scale : 1.0f;
     float w = width ? std::min(width * isc, (float)src->width) : (float)src->width;
@@ -3073,7 +3487,20 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     const float dw = std::round(w * k), dh = std::round(h * k);
     const float dx = std::floor((g.bb_w - dw) / 2), dy = std::floor((g.bb_h - dh) / 2);
     const config::Config& cfg = config::get();
-    const uint32_t swz = (fetch[3] >> 1) & 0xFFF;  // swizzle da constante de fetch do frontbuffer
+    uint32_t swz = (fetch[3] >> 1) & 0xFFF;  // swizzle da constante de fetch do frontbuffer
+    if (cfg.tonemap || cfg.vibrance > 0.005f) {  // antes do FSR: o RCAS afia a imagem já com a cor final
+      const uint32_t gw = (uint32_t)w, gh = (uint32_t)h;
+      if (!g.grade_tmp.res || g.grade_tmp.width != gw || g.grade_tmp.height != gh) {
+        if (g.grade_tmp.res) g.garbage.push_back(g.grade_tmp.res), g.grade_tmp.res = nullptr;
+        create_texture(g.grade_tmp, gw, gh, DXGI_FORMAT_R8G8B8A8_UNORM, true, false);
+      }
+      if (g.grade_tmp.res) {
+        blit(*src, g.grade_tmp.res, g.grade_tmp.state, g.grade_tmp.rtv, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0, w, h, 0, 0, w, h, false,
+             cfg.tonemap ? kColorFilmic : kColorVibrance, true, cfg.vibrance, swz);
+        src = &g.grade_tmp;
+        swz = kSwizzleIdentity;
+      }
+    }
     if (cfg.sharpening) {
       // FSR 1.0: EASU quando a saída é maior que a imagem interna (senão filtro linear), depois RCAS.
       if (!g.fsr_tmp.res || g.fsr_tmp.width != (uint32_t)dw || g.fsr_tmp.height != (uint32_t)dh) {
@@ -3152,6 +3579,10 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
                    parts.c_str(), g_pso_lib.loaded, g_pso_lib.created, g_pso_pool.created.load(), g_pso_pool.total.load(),
                    g_pso_pool.skipped.exchange(0));
     }
+    std::fprintf(stderr, "[gfx] em 120 frames: %u samplers anisotrópicos (por desenho), resolves: %u cópias lidas, %u reescritas sem "
+                         "leitura, %u passes de efeitos de ecrã; zero-copy: %u cópias evitadas, %u adiadas e feitas\n",
+                 g_aniso_samplers, g_rs_read, g_rs_unread, g_fx_passes, g_zc_saved, g_zc_done);
+    g_aniso_samplers = g_rs_read = g_rs_unread = g_fx_passes = g_zc_saved = g_zc_done = 0;
     g.stat_worst_ms = 0;
     g.stat_slow_frames = 0;
     g.stat_submits = g.stat_creates = 0;
@@ -3197,6 +3628,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   g.frame++;
   // ResolutionScale mudou no menu F8: as superfícies são recriadas no novo tamanho a partir do próximo frame.
   if (const float want = config::get().resolution_scale; want != g.scale) {
+    flush_all_pending();
     submit(true);
     submit(true);
     {

@@ -196,7 +196,9 @@ void window_thread(int width, int height, std::mutex* mu, std::condition_variabl
   RegisterClassExW(&wc);
   SetProcessDPIAware();
   const config::Config& cfg = config::get();
-  int w = (int)std::lround(width * cfg.resolution_scale), h_px = (int)std::lround(height * cfg.resolution_scale);
+  // Escalas abaixo de 1 (PC Fraco) mantêm a janela de 1280×720: a imagem interna é ampliada pelo EASU/linear.
+  const float win_scale = std::max(cfg.resolution_scale, 1.0f);
+  int w = (int)std::lround(width * win_scale), h_px = (int)std::lround(height * win_scale);
   if (const char* e = std::getenv("GOW_WINDOW_SIZE")) std::sscanf(e, "%dx%d", &w, &h_px);  // saída ≠ resolução interna
   // Em janela, limitado à área de trabalho (mantendo 16:9).
   RECT work{};

@@ -25,6 +25,21 @@ struct Config {
   bool sharpening = false;        // FSR 1.0 no passe final (EASU se a saída for maior, RCAS)
   float sharpening_strength = 0.5f;  // 0..1
   float mouse_sensitivity = 1.0f;
+  // Gráficos avançados (aba "Avançado & RT" do F8 e do launcher). Tudo desligado = imagem da v0.9.1.
+  std::string preset = "Custom";    // último preset aplicado (LowSpec, Original, Modern, Ultra) ou Custom
+  int anisotropy = 0;               // 0 = como o jogo; 2/4/8/16 = anisotrópico nos samplers 2D lineares com mips
+  bool fp16_targets = false;        // RTs 7e3 sem o limite de 31,875 (gama completa do FP16)
+  bool tonemap = false;             // curva fílmica suave sobre a imagem final (já em LDR)
+  float vibrance = 0.0f;            // 0..1: saturação seletiva das cores pouco saturadas
+  bool gtao = false;                // oclusão ambiente em espaço de ecrã
+  float gtao_intensity = 0.6f;
+  bool ssrtgi = false;              // iluminação global de 1 rebote em espaço de ecrã
+  float ssrtgi_intensity = 0.5f;
+  bool ssr = false;                 // reflexos em espaço de ecrã
+  float ssr_intensity = 0.4f;
+  bool ss_half_res = true;          // efeitos de ecrã a meia resolução com upsample bilateral
+  bool raytracing = false;          // DXR 1.1 (só indicador; ver d3d12_renderer.cpp)
+  bool zero_copy = true;            // resolves cujo destino nunca é lido não são copiados
   std::string player_name;  // nome no jogo (vazio = "Player")
   bool tunnel_host = false;  // anfitrião do túnel P2P no arranque
   std::string join_tunnel;   // gow://join/… do anfitrião
@@ -35,5 +50,11 @@ struct Config {
 const Config& get();  // carrega na 1ª chamada
 Config& edit();       // a mesma instância, para o menu F8 (leituras noutras threads: valores simples, sem sincronização)
 void save();          // grava as opções do menu F8 e o IsoPath no gow_config.ini, mantendo o resto do ficheiro
+
+// Presets da aba Vídeo: definem escala, FSR, FPS e os gráficos avançados (não tocam no ecrã inteiro, VSync, som nem teclas).
+enum Preset { kPresetLowSpec, kPresetOriginal, kPresetModern, kPresetUltra, kPresetCount };
+const char* preset_key(int p);  // "LowSpec", "Original", "Modern", "Ultra"
+void apply_preset(Config& c, int p, bool raytracing_available);
+int preset_index(const std::string& key);  // -1 = Custom
 
 }  // namespace config

@@ -42,6 +42,8 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
 const char* phase();
 // Grava a cache de PSOs do driver (user_data/shader_cache/pipelines.bin) se tiver entradas novas. Chamado antes de sair.
 void save_caches();
+// D3D12_RAYTRACING_TIER da GPU: 0 = sem DXR, 10 = DXR 1.0, 11 = DXR 1.1 (RayQuery). Funciona antes de init() (launcher).
+int raytracing_tier();
 
 }  // namespace render
 }  // namespace gpu
