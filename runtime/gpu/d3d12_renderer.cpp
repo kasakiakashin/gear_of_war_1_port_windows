@@ -1877,6 +1877,82 @@ void rt_resolve_stamps() {
   g.list->ResolveQueryData(g_rt.qh, D3D12_QUERY_TYPE_TIMESTAMP, b, 4, g_rt.qread, b * 8);
 }
 
+// GOW_GPU_PASSES=1: tempo de GPU de cada passe do jogo. Um timestamp no início do frame e outro em cada resolve (cada resolve
+// fecha um passe do UE3: sombras, profundidade, cena, translúcidos, bloom, tonemap…) e no fim; a cada 120 frames imprime, por
+// ordem do passe no frame, a média de ms de GPU e de desenhos. Serve para ver o que pesa numa GPU fraca.
+struct PassProf {
+  static constexpr uint32_t kMax = 64, kRing = 4;
+  ID3D12QueryHeap* qh = nullptr;
+  ID3D12Resource* rb = nullptr;
+  uint64_t freq = 0;
+  uint32_t n[kRing] = {}, draws[kRing][kMax] = {};
+  bool valid[kRing] = {};
+  double ms[kMax] = {}, dr[kMax] = {};
+  uint32_t frames = 0, segs = 0;
+} g_pp;
+const bool g_pass_prof = std::getenv("GOW_GPU_PASSES") != nullptr;
+
+void pass_prof_stamp() {
+  if (!g_pass_prof) return;
+  if (!g_pp.qh) {
+    D3D12_QUERY_HEAP_DESC qd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, PassProf::kMax * PassProf::kRing, 0};
+    if (FAILED(g.device->CreateQueryHeap(&qd, IID_PPV_ARGS(&g_pp.qh)))) return;
+    g_pp.rb = rt_buffer(PassProf::kMax * PassProf::kRing * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false);
+    g.queue->GetTimestampFrequency(&g_pp.freq);
+  }
+  const uint32_t s = (uint32_t)(g.frame % PassProf::kRing);
+  if (!g_pp.rb || g_pp.n[s] >= PassProf::kMax) return;
+  g.list->EndQuery(g_pp.qh, D3D12_QUERY_TYPE_TIMESTAMP, s * PassProf::kMax + g_pp.n[s]);
+  g_pp.draws[s][g_pp.n[s]++] = g.draws;
+}
+
+void pass_prof_end_frame() {
+  if (!g_pass_prof || !g_pp.rb) return;
+  pass_prof_stamp();
+  const uint32_t s = (uint32_t)(g.frame % PassProf::kRing);
+  g.list->ResolveQueryData(g_pp.qh, D3D12_QUERY_TYPE_TIMESTAMP, s * PassProf::kMax, g_pp.n[s], g_pp.rb, s * PassProf::kMax * 8ull);
+  g_pp.valid[s] = true;
+}
+
+// Depois de frame++: lê o frame de há 3 (já executado: há no máximo 2 em voo) e começa o novo com o 1.º timestamp.
+void pass_prof_begin_frame() {
+  if (!g_pass_prof) return;
+  const uint32_t s = (uint32_t)(g.frame % PassProf::kRing), old = (uint32_t)((g.frame + 1) % PassProf::kRing);
+  if (g_pp.rb && g_pp.valid[old] && g_pp.n[old] > 1) {
+    uint64_t* t = nullptr;
+    D3D12_RANGE r{old * PassProf::kMax * 8ull, (old * PassProf::kMax + g_pp.n[old]) * 8ull};
+    if (SUCCEEDED(g_pp.rb->Map(0, &r, reinterpret_cast<void**>(&t)))) {
+      const uint64_t* f = t + old * PassProf::kMax;
+      for (uint32_t i = 0; i + 1 < g_pp.n[old] && i < PassProf::kMax; i++)
+        if (f[i + 1] >= f[i]) {
+          g_pp.ms[i] += (f[i + 1] - f[i]) * 1000.0 / g_pp.freq;
+          g_pp.dr[i] += g_pp.draws[old][i + 1] - g_pp.draws[old][i];
+        }
+      g_pp.segs = std::max(g_pp.segs, g_pp.n[old] - 1);
+      g_pp.frames++;
+      D3D12_RANGE none{0, 0};
+      g_pp.rb->Unmap(0, &none);
+    }
+  }
+  g_pp.valid[s] = false;
+  g_pp.n[s] = 0;
+  if (g_pp.frames >= 120) {
+    double total = 0;
+    std::string line;
+    for (uint32_t i = 0; i < g_pp.segs; i++) {
+      const double ms = g_pp.ms[i] / g_pp.frames;
+      total += ms;
+      char b[64];
+      std::snprintf(b, sizeof b, " %u:%.1f(%.0f)", i, ms, g_pp.dr[i] / g_pp.frames);
+      line += b;
+      g_pp.ms[i] = g_pp.dr[i] = 0;
+    }
+    std::fprintf(stderr, "[gpu-passes] %.1f ms de GPU por frame; passe:ms(desenhos):%s\n", total, line.c_str());
+    g_pp.frames = g_pp.segs = 0;
+  }
+  pass_prof_stamp();
+}
+
 // No hook dos efeitos: o que foi capturado vira BLAS + TLAS.
 bool rt_build() {
   g_rt.built = false;
@@ -2401,8 +2477,16 @@ void open_pso_library() {
   PsoLibrary& L = g_pso_lib;
   if (std::getenv("GOW_NO_PSO_CACHE") || FAILED(g.device->QueryInterface(IID_PPV_ARGS(&L.dev1)))) return;
   {
-    std::ifstream in(pso_library_file(), std::ios::binary);
-    if (in) L.blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    // Limite de tamanho: cada sessão acrescenta PSOs, e o driver da Intel (HD 620) bloqueava mais de 2 minutos a carregar uma
+    // biblioteca de 307 MB. Acima do limite começa-se vazia (os PSOs voltam a vir da cache do driver ou são recriados).
+    static const double cap_mb = std::getenv("GOW_PSO_CACHE_MB") ? std::atof(std::getenv("GOW_PSO_CACHE_MB")) : 128.0;
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(pso_library_file(), ec);
+    if (!ec && size > cap_mb * 1048576.0) {
+      std::fprintf(stderr, "[d3d12] cache de PSOs com %.0f MB (limite %.0f MB): começa vazia\n", size / 1048576.0, cap_mb);
+    } else if (std::ifstream in{pso_library_file(), std::ios::binary}) {
+      L.blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
   }
   HRESULT hr = L.blob.empty() ? E_FAIL : L.dev1->CreatePipelineLibrary(L.blob.data(), L.blob.size(), IID_PPV_ARGS(&L.lib));
   if (FAILED(hr)) {
@@ -2586,13 +2670,25 @@ void pso_worker() {
 
 void start_pso_pool() {
   PsoPool& P = g_pso_pool;
-  const unsigned n = std::clamp(std::thread::hardware_concurrency() / 3, 2u, 4u);
-  for (unsigned i = 0; i < n; i++) std::thread(pso_worker).detach();
+  // CPU com 4 threads lógicas ou menos (ex.: i3 de 2 núcleos): criar PSOs custa ~1 s cada no driver da Intel e as threads de
+  // pré-criação tiravam o CPU ao jogo (0 frames em 2 minutos). Aí as threads ficam abaixo do normal e a lista do pacote (todos os
+  // capítulos) não é pré-criada; só o histórico deste PC e o que os desenhos pedem. GOW_PSO_PREWARM=1 força a lista toda.
+  const unsigned hw = std::thread::hardware_concurrency();
+  const bool weak = hw && hw <= 4;
+  const unsigned n = std::clamp(hw / 3, 2u, 4u);
+  for (unsigned i = 0; i < n; i++)
+    std::thread([weak] {
+      if (weak) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+      pso_worker();
+    }).detach();
   if (std::getenv("GOW_NO_PSO_PREWARM")) return;
   std::vector<PsoRecord> list;
   wchar_t exe[MAX_PATH * 4];
   const DWORD n_exe = GetModuleFileNameW(nullptr, exe, (DWORD)(sizeof exe / sizeof exe[0]));
-  read_pso_list(std::filesystem::path(std::wstring(exe, n_exe)).parent_path() / "prebuilt_psos.bin", list);
+  if (!weak || std::getenv("GOW_PSO_PREWARM"))
+    read_pso_list(std::filesystem::path(std::wstring(exe, n_exe)).parent_path() / "prebuilt_psos.bin", list);
+  else
+    std::fprintf(stderr, "[d3d12] CPU com %u threads: sem pré-criação da lista de PSOs do pacote (GOW_PSO_PREWARM=1 força)\n", hw);
   const size_t shipped = list.size();
   read_pso_list(pso_list_file(), list);
   std::lock_guard<std::mutex> lock(P.mu);
@@ -2915,6 +3011,7 @@ void activate_tiles() {
 
 // ---- Resolve ----
 void resolve() {
+  pass_prof_stamp();
   Prof pf(kProfResolve);
   g.resolves++;
   g.tex_lookup.clear();
@@ -4193,6 +4290,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     dump_rgba(bb, bb_state, name);
   }
   transition(bb, bb_state, D3D12_RESOURCE_STATE_PRESENT);
+  pass_prof_end_frame();
   submit();
   {
     Prof pf_present(kProfPresent);
@@ -4317,6 +4415,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   g.draws = g.skipped = g.resolves = 0;
   g.shader_wait_ms = 0;
   g.frame++;
+  pass_prof_begin_frame();
   // ResolutionScale mudou no menu F8: as superfícies são recriadas no novo tamanho a partir do próximo frame.
   if (const float want = config::get().resolution_scale; want != g.scale) {
     flush_all_pending();

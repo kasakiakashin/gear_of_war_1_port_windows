@@ -1,7 +1,11 @@
 // rtl.cpp — critical sections do RTL e listas SLIST interligadas.
 #include <immintrin.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 #include "kernel/kernel.h"
@@ -41,6 +45,24 @@ XBOX_IMPORT(RtlInitializeCriticalSectionAndSpinCount) {
 }
 XBOX_IMPORT(RtlDeleteCriticalSection) {}
 
+// Voltas de spin para ~GOW_CS_SPIN_US microssegundos (0 = sem spin). O custo do `pause` varia muito entre CPUs (~10 ciclos nos
+// Zen, ~140 nos Intel desde o Skylake): um número fixo de voltas dava 30 µs num e 125 µs noutro. Calibrado uma vez no arranque.
+static int spin_iterations() {
+  static const int n = [] {
+    const char* e = std::getenv("GOW_CS_SPIN_US");
+    const double us = e && *e ? std::atof(e) : 30.0;
+    if (us <= 0) return 0;
+    constexpr int kProbe = 4096;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < kProbe; i++) _mm_pause();
+    const double per = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / kProbe;
+    const int it = (int)std::clamp(us / std::max(per, 1e-4), 16.0, 1e6);
+    std::fprintf(stderr, "[kernel] spin das critical sections: %d voltas (%.3f µs por pause, ~%.0f µs)\n", it, per, us);
+    return it;
+  }();
+  return n;
+}
+
 // Com contenção, bloquear logo custa uma ida e volta ao escalonador (o dispatcher acorda as threads por uma variável de condição
 // global), e o lock do alocador do UE3 (FMallocThreadSafeProxy, partilhado pela game thread e pela de render) só fica ocupado
 // durante um malloc: em Alamo 16–26% do tempo dessas threads era esta espera. Como o spin count do CRITICAL_SECTION real, tenta-se
@@ -53,7 +75,7 @@ XBOX_IMPORT(RtlEnterCriticalSection) {
     return;
   }
   if (ppc_ld32(mem_base, cs + kOwner) != cur) {
-    for (int i = 0; i < 2048; i++) {
+    for (int i = 0, n = spin_iterations(); i < n; i++) {
       _mm_pause();
       if (ppc_ld32(mem_base, cs + kLockCount) == 0xFFFFFFFFu && atomic_cas32(mem_base, cs + kLockCount, 0xFFFFFFFFu, 0)) {
         ppc_st32(mem_base, cs + kOwner, cur);

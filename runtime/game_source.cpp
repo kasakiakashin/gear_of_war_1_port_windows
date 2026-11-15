@@ -359,11 +359,19 @@ bool prepare(std::vector<uint8_t>* image) {
       std::wstring cmd = L"\"" + other.wstring() + L"\"";
       for (const std::wstring& a : g_args) cmd += L" \"" + a + L"\"";
       if (!has_flag(L"--skip-launcher")) cmd += L" --skip-launcher";
+      // O log do irmão vai para o mesmo sítio que o deste (consola ou ficheiro redirecionado).
       STARTUPINFOW si{};
       si.cb = sizeof si;
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+      si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+      si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+      for (HANDLE h : {si.hStdOutput, si.hStdError})
+        if (h && h != INVALID_HANDLE_VALUE) SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
       PROCESS_INFORMATION pi{};
       std::fprintf(stderr, "[gow] o jogo é de outra versão: a abrir %s\n", other.string().c_str());
-      if (CreateProcessW(other.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+      std::fflush(stderr);
+      if (CreateProcessW(other.c_str(), cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         ExitProcess(0);
