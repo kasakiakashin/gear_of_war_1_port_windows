@@ -115,6 +115,10 @@ void apply_game_dir() {
     else std::fprintf(stderr, "[gow] GameDir ignorado (sem WarGame\\Xbox360TOC.txt): %s\n", dir.c_str());
   }
   const XexInfo& x = loose_xex(vfs::game_root());
+  if (x.present)
+    std::fprintf(stderr, "[gow] pasta do jogo %s: default.xex %s (este exe: %s)%s\n", vfs::game_root().string().c_str(),
+                 to_utf8(x.version).c_str(), xex_image::kVersion,
+                 x.supported ? "" : x.sibling.empty() ? ", outra versão sem executável irmão" : ", abre o executável irmão");
   // Da outra versão com o irmão presente: abre-se esse executável com a pasta inteira (preparar); só sem irmão é que o
   // executável tem de vir da ISO.
   vfs::hide_loose_xex(x.present && !x.supported && x.sibling.empty());

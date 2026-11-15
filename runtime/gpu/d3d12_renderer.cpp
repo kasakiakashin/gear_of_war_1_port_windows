@@ -50,6 +50,7 @@
 #include "gpu/xenos_shader.h"
 #include "guest_memory.h"
 #include "kernel/vfs.h"
+#include "kernel/xex_image.h"
 #include "shader_prep.h"
 
 namespace gpu::render {
@@ -4220,14 +4221,25 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   }
   if (g.frame % 30 == 0 && g_prebuild_left.load()) {
     char t[128];
-    std::snprintf(t, sizeof t, "Gears of War (recompilado) - a preparar shaders: faltam %u (s\u00f3 da 1.\u00aa vez)", g_prebuild_left.load());
+    std::snprintf(t, sizeof t, "Gears of War \u00b7 a preparar shaders: faltam %u (s\u00f3 da 1.\u00aa vez)", g_prebuild_left.load());
     window::set_title(t);
   }
+  // T\u00edtulo: FPS do \u00faltimo segundo, resolu\u00e7\u00e3o interna, vers\u00e3o do execut\u00e1vel e o atalho do menu (+ estado do Co-op).
+  {
+    static auto title_t0 = std::chrono::steady_clock::now();
+    static uint64_t title_f0 = 0;
+    const auto now = std::chrono::steady_clock::now();
+    const double dt = std::chrono::duration<double>(now - title_t0).count();
+    if (dt >= 1.0 && !g_prebuild_left.load()) {
+      char t[192];
+      std::snprintf(t, sizeof t, "Gears of War \u00b7 %.0f FPS \u00b7 %u\u00d7%u \u00b7 %s \u00b7 F8: configura\u00e7\u00f5es",
+                    (g.frame - title_f0) / dt, scaled((float)kWidth), scaled((float)kHeight),
+                    xex_image::kSelf == 1 ? "Title Update 5" : "Disco");
+      window::set_title((t + net::status()).c_str());
+      title_t0 = now, title_f0 = g.frame;
+    }
+  }
   if (g.frame % 120 == 0) {
-    char title_[160];
-    std::snprintf(title_, sizeof title_, "Gears of War (recompilado) - frame %llu, %u desenhos, %u resolves",
-                  (unsigned long long)g.frame, g.draws, g.resolves);
-    window::set_title((title_ + net::status()).c_str());
     static auto fps_t0 = std::chrono::steady_clock::now();
     const auto fps_now = std::chrono::steady_clock::now();
     const double fps = 120.0 / std::max(1e-3, std::chrono::duration<double>(fps_now - fps_t0).count());

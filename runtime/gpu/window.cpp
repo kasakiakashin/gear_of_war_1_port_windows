@@ -211,7 +211,7 @@ void window_thread(int width, int height, std::mutex* mu, std::condition_variabl
   }
   RECT r{0, 0, w, h_px};
   AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-  HWND hw = CreateWindowExW(0, wc.lpszClassName, L"Gears of War (recompilado)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+  HWND hw = CreateWindowExW(0, wc.lpszClassName, L"Gears of War", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                             CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
   if (hw) {
     RAWINPUTDEVICE rid{0x01, 0x02, 0, hw};  // rato (generic desktop / mouse)
