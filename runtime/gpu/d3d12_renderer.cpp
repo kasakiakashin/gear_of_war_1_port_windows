@@ -53,7 +53,11 @@
 #include "shader_prep.h"
 
 namespace gpu::render {
+int raytracing_tier();
 namespace {
+bool g_root_so = false;  // GPU com DXR 1.1: os VS podem capturar posições para o ray tracing (xe_capture)
+ID3D12Resource* g_dummy_uav = nullptr;  // o UAV raiz dos VS quando não capturam (nunca escrito)
+D3D12_GPU_VIRTUAL_ADDRESS g_bound_uav = 0;
 
 constexpr uint32_t kWidth = 1280, kHeight = 720, kBackBuffers = 2;
 // Dois frames em voo: cada anel (upload, SRV, samplers) está dividido em duas metades, uma por slot.
@@ -116,6 +120,24 @@ struct Texture {
   bool read = true;  // destinos de resolve: amostrada desde a última cópia (estatística do zero-copy)
   uint16_t pend_src = 0;  // cópias de resolve adiadas que leem deste RT (ZeroCopyResolves)
   bool pend_dst = false;  // este destino de resolve tem uma cópia adiada por fazer
+  // Zero-copy por alias: um destino de resolve cujo conteúdo é a região (0, 0) de um RT usa o próprio recurso do RT (res, tamanho,
+  // formato e estado vêm dele; os próprios ficam em `own`). Quando o RT vai ser escrito: se a escrita é uma limpeza que o cobre
+  // todo, o destino fica com o recurso e o RT recebe outro do pool (ping-pong, sem cópia); senão faz-se a cópia, como antes.
+  Texture* alias = nullptr;
+  uint16_t aliased_by = 0;   // RT: destinos que são, por agora, este recurso
+  uint32_t view_swz = 0x688;  // swizzle base do SRV: RRRR para a profundidade, ZYXW com copy_dest_swap
+  struct Own {
+    ID3D12Resource* res = nullptr;
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+    uint32_t width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    bool depth = false, has_rtv = false;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+  } own;
+  float alias_w = 0, alias_h = 0;       // região (px internos) que a cópia teria
+  uint32_t alias_tw = 0, alias_th = 0;  // tamanho da cópia própria
+  DXGI_FORMAT alias_tf = DXGI_FORMAT_UNKNOWN;
+  int alias_mode = 0;
 };
 
 struct RtKey {
@@ -436,11 +458,24 @@ void transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D12_RESOURCE_ST
 // faz. Todas as leituras e escritas de texturas passam por transition(Texture&), por isso é aí que as pendentes se resolvem.
 void flush_pending_src(Texture* src);
 void flush_pending_dst(Texture* dst);
+void copy_on_write(Texture& rt);
+void materialize(Texture& d);
+std::vector<Texture*> g_aliases;  // destinos de resolve que são, por agora, um RT
+uint32_t g_zc_alias = 0, g_zc_swap = 0, g_zc_mat = 0, g_resolve_copies = 0;  // relatório de 120 frames
 void transition(Texture& t, D3D12_RESOURCE_STATES to) {
-  if (t.pend_src && (to == D3D12_RESOURCE_STATE_RENDER_TARGET || to == D3D12_RESOURCE_STATE_DEPTH_WRITE)) flush_pending_src(&t);
+  if (t.alias) {  // destino de resolve que é o recurso de um RT: o estado é o do RT
+    transition(*t.alias, to);
+    return;
+  }
+  const bool write = to == D3D12_RESOURCE_STATE_RENDER_TARGET || to == D3D12_RESOURCE_STATE_DEPTH_WRITE;
+  if (t.pend_src && write) flush_pending_src(&t);
   if (t.pend_dst) flush_pending_dst(&t);
+  if (t.aliased_by && write) copy_on_write(t);
   transition(t.res, t.state, to);
 }
+// Limpeza a seguir (try_clear, limpezas do resolve): um RT com aliases que vai ser limpo por inteiro troca de recurso em vez de copiar.
+Texture* g_clear_target = nullptr;
+D3D12_RECT g_clear_rect{};
 
 void wait_fence(uint64_t value) {
   if (g.fence->GetCompletedValue() < value) {
@@ -519,6 +554,7 @@ void queue_writeback(Texture& t, uint32_t row, uint32_t w, uint32_t h, uint32_t 
 
 // Esquece o estado gravado no command list (root signature, PSO, argumentos, OM/RS/IA): o próximo desenho volta a defini-lo.
 void invalidate_bound() {
+  g_bound_uav = 0;
   g.bound_root = nullptr;
   g.bound_pso = nullptr;
   for (auto& v : g.bound_cbv) v = 0;
@@ -527,6 +563,34 @@ void invalidate_bound() {
   g.bound_om = g.bound_misc = 0;
   g.bound_scissor = {-1, -1, -1, -1};
   g.bound_topo = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+}
+
+// GOW_DRED=1: Device Removed Extended Data (breadcrumbs e page fault) ligados antes de criar o dispositivo; no primeiro device
+// removed imprime as operações da GPU por acabar de cada command list e o endereço da falha de página.
+void dred_report() {
+  static bool done = false;
+  if (done || !std::getenv("GOW_DRED")) return;
+  done = true;
+  ID3D12DeviceRemovedExtendedData* dred = nullptr;
+  if (FAILED(g.device->QueryInterface(IID_PPV_ARGS(&dred)))) {
+    std::fprintf(stderr, "[dred] indisponível\n");
+    return;
+  }
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
+  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) {
+    for (const D3D12_AUTO_BREADCRUMB_NODE* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
+      const uint32_t done_ops = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
+      if (done_ops >= n->BreadcrumbCount) continue;  // acabou
+      std::fprintf(stderr, "[dred] command list com %u operações, %u concluídas; seguintes:", n->BreadcrumbCount, done_ops);
+      for (uint32_t i = done_ops; i < n->BreadcrumbCount && i < done_ops + 12; i++)
+        std::fprintf(stderr, " %d", (int)n->pCommandHistory[i]);
+      std::fprintf(stderr, "\n");
+    }
+  }
+  D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
+  if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)))
+    std::fprintf(stderr, "[dred] page fault em 0x%llX\n", (unsigned long long)pf.PageFaultVA);
+  dred->Release();
 }
 
 // Executa o que foi gravado e reabre o command list no outro slot. Só se espera pela GPU até ao fim do submit
@@ -551,6 +615,7 @@ void submit(bool wait_all = false) {
   if (dt > 500 || FAILED(removed))
     std::fprintf(stderr, "[d3d12] submit: GPU demorou %llu ms (device removed: 0x%08lX)\n", (unsigned long long)dt,
                  removed);
+  if (FAILED(removed)) dred_report();
   flush_writebacks();
   for (ID3D12Resource* r : g.slot_garbage[g.slot]) r->Release();
   g.slot_garbage[g.slot].clear();
@@ -747,6 +812,14 @@ bool create_texture(Texture& t, uint32_t w, uint32_t h, DXGI_FORMAT f, bool rend
 // Shader4ComponentMapping do D3D12. Aplica-se por cima do mapeamento base do formato.
 constexpr uint32_t kSwizzleIdentity = 0x688, kSwizzleSwapRB = 0x60A;  // XYZW / ZYXW
 void write_srv(const Texture& t, uint32_t slot, uint32_t swizzle = kSwizzleIdentity) {
+  if (t.view_swz != kSwizzleIdentity) {  // swizzle do pedido por cima da do alias
+    uint32_t m = 0;
+    for (uint32_t c = 0; c < 4; c++) {
+      const uint32_t s = (swizzle >> (3 * c)) & 7;
+      m |= (s < 4 ? (t.view_swz >> (3 * s)) & 7 : s) << (3 * c);
+    }
+    swizzle = m;
+  }
   D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
   sd.Format = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.format;
   sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -959,6 +1032,12 @@ Texture* render_target_slow(uint32_t base, uint32_t xe_format, uint32_t pitch, b
   uint32_t h = std::min(scaled((float)logical_h), kMaxTexture);
   if (t.res && t.height >= h) return &t;
   if (t.pend_src) flush_pending_src(&t);
+  if (t.aliased_by) {
+    std::vector<Texture*> mine;
+    for (Texture* a : g_aliases)
+      if (a->alias == &t) mine.push_back(a);
+    for (Texture* a : mine) materialize(*a);
+  }
   if (t.res) g.garbage.push_back(t.res), t.res = nullptr;  // recriado maior (conteúdo perdido)
   forget_recent_rts();  // outra chave com a mesma superfície pode ter guardado uma altura menor
   if (!create_texture(t, std::min(scaled((float)std::min<uint32_t>(pitch, 8192)), kMaxTexture), h, f, !depth, depth)) return nullptr;
@@ -1059,7 +1138,12 @@ bool create_roots() {
   p[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   p[9].DescriptorTable = {1, &smp};
   p[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-  D3D12_ROOT_SIGNATURE_DESC rd{10, p, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  // 10: UAV raiz (u0, space1) onde os VS capturados escrevem as posições para o ray tracing (xe_capture).
+  p[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  p[10].Descriptor = {0, 1};
+  p[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  g_root_so = raytracing_tier() >= 11;
+  D3D12_ROOT_SIGNATURE_DESC rd{11, p, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   ID3DBlob *blob = nullptr, *err = nullptr;
   if (FAILED(g.serialize_rs(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err))) {
     std::fprintf(stderr, "[d3d12] root signature: %s\n", err ? (const char*)err->GetBufferPointer() : "?");
@@ -1068,6 +1152,19 @@ bool create_roots() {
   if (FAILED(g.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g.root))))
     return false;
   blob->Release();
+  {
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = 256;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    auto hp = heap(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                 IID_PPV_ARGS(&g_dummy_uav))))
+      return false;
+  }
 
   // Blit: 4 constantes (uv0, duv por pixel) + 1 flag de filtro, tabela t0, samplers estáticos ponto/linear.
   D3D12_ROOT_PARAMETER bp[2] = {};
@@ -1201,6 +1298,7 @@ void run_pending(size_t i) {
   blit(*c.src, c.dst->res, c.dst->state, c.dst->rtv, c.format, c.sx, c.sy, c.sw, c.sh, 0, c.dy, c.sw, c.sh, false, c.mode, false,
        c.scale, c.swizzle);
   g_zc_done++;
+  g_resolve_copies++;
 }
 void flush_pending_src(Texture* src) {
   for (size_t i = 0; i < g_pending.size();)
@@ -1214,6 +1312,154 @@ void flush_pending_dst(Texture* dst) {
 }
 void flush_all_pending() {
   while (!g_pending.empty()) run_pending(0);
+}
+
+// Recursos de RT livres (ping-pong): reutilizados por um RT com a mesma descrição. Numa só fila as barreiras ordenam tudo.
+struct PoolRes {
+  ID3D12Resource* res;
+  D3D12_RESOURCE_STATES state;
+  uint32_t w, h;
+  DXGI_FORMAT f;
+  bool depth;
+};
+std::vector<PoolRes> g_rt_pool;
+
+void pool_put(ID3D12Resource* r, D3D12_RESOURCE_STATES st, uint32_t w, uint32_t h, DXGI_FORMAT f, bool depth) {
+  if (!r) return;
+  if (g_rt_pool.size() >= 16) {
+    g.garbage.push_back(g_rt_pool.front().res);
+    g_rt_pool.erase(g_rt_pool.begin());
+  }
+  g_rt_pool.push_back({r, st, w, h, f, depth});
+}
+
+// Garante que `d` tem um recurso de cor `tf` com pelo menos tw × th e RTV, sem criar recursos em regime: o que tem serve, senão
+// troca-o por um do pool. O descritor RTV é o do próprio destino (reescrito), para não gastar o anel de descritores dos RTs.
+bool copy_target(Texture& d, uint32_t tw, uint32_t th, DXGI_FORMAT tf) {
+  const bool fits = d.res && !d.depth && d.format == tf && d.width >= tw && d.height >= th;
+  if (!fits) {
+    if (d.res) pool_put(d.res, d.state, d.width, d.height, d.format, d.depth), d.res = nullptr;
+    for (size_t i = 0; i < g_rt_pool.size(); i++) {
+      const PoolRes& pr = g_rt_pool[i];
+      if (!pr.depth && pr.f == tf && pr.w >= tw && pr.h >= th) {
+        d.res = pr.res, d.state = pr.state, d.width = pr.w, d.height = pr.h, d.format = tf, d.depth = false, d.has_rtv = false;
+        g_rt_pool.erase(g_rt_pool.begin() + (ptrdiff_t)i);
+        break;
+      }
+    }
+    if (!d.res) {
+      Texture tmp;
+      if (!create_texture(tmp, tw, th, tf, true, false)) return false;
+      d.res = tmp.res, d.state = tmp.state, d.width = tw, d.height = th, d.format = tf, d.depth = false;
+      if (!d.rtv.ptr) d.rtv = tmp.rtv, d.has_rtv = true;
+      else d.has_rtv = false;
+    }
+  }
+  if (!d.has_rtv) {
+    if (!d.rtv.ptr) d.rtv = cpu_handle(g.rtv_heap, g.rtv_inc, kBackBuffers + g.rtv_next++ % (kRtvHeapSize - kBackBuffers));
+    g.device->CreateRenderTargetView(d.res, nullptr, d.rtv);
+    d.has_rtv = true;
+    g.bound_om = 0;
+  }
+  d.view_swz = kSwizzleIdentity;
+  return true;
+}
+
+void unalias(Texture& d) {  // volta aos campos próprios, sem copiar
+  if (!d.alias) return;
+  d.alias->aliased_by--;
+  d.alias = nullptr;
+  d.res = d.own.res, d.state = d.own.state, d.width = d.own.width, d.height = d.own.height, d.format = d.own.format;
+  d.depth = d.own.depth, d.has_rtv = d.own.has_rtv, d.rtv = d.own.rtv;
+  d.own = {};
+  d.view_swz = kSwizzleIdentity;
+  g_aliases.erase(std::find(g_aliases.begin(), g_aliases.end(), &d));
+}
+
+void alias_to(Texture& d, Texture& rt, float w, float h, uint32_t tw, uint32_t th, DXGI_FORMAT tf, int mode, uint32_t swz) {
+  unalias(d);
+  d.own = {d.res, d.state, d.width, d.height, d.format, d.depth, d.has_rtv, d.rtv};
+  d.alias = &rt;
+  rt.aliased_by++;
+  d.res = rt.res, d.width = rt.width, d.height = rt.height, d.format = rt.format, d.depth = rt.depth, d.has_rtv = false;
+  d.view_swz = swz;  // d.rtv fica: é o descritor próprio do destino
+  d.alias_w = w, d.alias_h = h, d.alias_tw = tw, d.alias_th = th, d.alias_tf = tf, d.alias_mode = mode;
+  g_aliases.push_back(&d);
+  g_zc_alias++;
+}
+
+// O destino passa a ter a sua cópia (a escrita no RT seria por cima do conteúdo, ou o RT vai ser recriado).
+void materialize(Texture& d) {
+  Texture& rt = *d.alias;
+  const bool depth_alias = rt.depth;
+  const uint32_t swz = depth_alias ? kSwizzleIdentity : d.view_swz;
+  unalias(d);
+  if (!copy_target(d, d.alias_tw, d.alias_th, d.alias_tf)) return;
+  blit(rt, d.res, d.state, d.rtv, d.alias_tf, 0, 0, d.alias_w, d.alias_h, 0, 0, d.alias_w, d.alias_h, false, d.alias_mode, false,
+       1.0f, swz);
+  g_zc_mat++;
+  g_resolve_copies++;
+}
+
+void copy_on_write(Texture& rt) {
+  std::vector<Texture*> mine;
+  for (Texture* a : g_aliases)
+    if (a->alias == &rt) mine.push_back(a);
+  const bool full = g_clear_target == &rt && g_clear_rect.left <= 0 && g_clear_rect.top <= 0 &&
+                    g_clear_rect.right >= (LONG)rt.width && g_clear_rect.bottom >= (LONG)rt.height;
+  g.desc_cache.clear();  // tabelas de descritores com o recurso antigo
+  if (!full || mine.empty()) {
+    for (Texture* a : mine) materialize(*a);
+    return;
+  }
+  for (size_t i = 1; i < mine.size(); i++) materialize(*mine[i]);
+  // Ping-pong: o destino fica com o recurso atual (já tem o conteúdo) e o RT, que vai ser limpo por inteiro, recebe outro.
+  Texture& d = *mine[0];
+  ID3D12Resource* old_own = d.own.res;
+  const Texture::Own own = d.own;
+  d.alias = nullptr;
+  rt.aliased_by--;
+  g_aliases.erase(std::find(g_aliases.begin(), g_aliases.end(), &d));
+  d.own = {};
+  d.state = rt.state;  // res, tamanho, formato e depth já são os do RT; sem RTV próprio
+  if (old_own) pool_put(old_own, own.state, own.width, own.height, own.format, own.depth);
+  ID3D12Resource* fresh = nullptr;
+  D3D12_RESOURCE_STATES fresh_state{};
+  for (size_t i = 0; i < g_rt_pool.size(); i++) {
+    const PoolRes& pr = g_rt_pool[i];
+    if (pr.w == rt.width && pr.h == rt.height && pr.f == rt.format && pr.depth == rt.depth) {
+      fresh = pr.res, fresh_state = pr.state;
+      g_rt_pool.erase(g_rt_pool.begin() + (ptrdiff_t)i);
+      break;
+    }
+  }
+  if (!fresh) {
+    Texture tmp;
+    if (!create_texture(tmp, rt.width, rt.height, rt.format, !rt.depth, rt.depth)) {  // sem memória: copia, como antes
+      d.alias = &rt, rt.aliased_by++, g_aliases.push_back(&d), d.own = own;
+      materialize(d);
+      return;
+    }
+    fresh = tmp.res, fresh_state = tmp.state;
+  }
+  rt.res = fresh;
+  rt.state = fresh_state;
+  if (rt.depth) {
+    D3D12_DEPTH_STENCIL_VIEW_DESC dv{};
+    dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    g.device->CreateDepthStencilView(rt.res, &dv, rt.dsv);
+  } else {
+    g.device->CreateRenderTargetView(rt.res, nullptr, rt.rtv);
+  }
+  g.bound_om = 0;  // o mesmo descritor aponta agora para outro recurso
+  g_zc_swap++;
+}
+
+void drop_all_aliases() {  // antes de destruir RTs e cópias (mudança de escala)
+  while (!g_aliases.empty()) unalias(*g_aliases.back());
+  for (PoolRes& pr : g_rt_pool) g.garbage.push_back(pr.res);
+  g_rt_pool.clear();
 }
 
 // ---- Shaders ----
@@ -1393,6 +1639,278 @@ float4 composite(float4 pos : SV_Position) : SV_Target {
 }
 )";
 
+// ---- DXR 1.1: oclusão ambiente com raios sobre a geometria pós-VS (stream-out) ----
+#include "gpu/rt_shaders.inc"
+struct RtState {
+  bool tried = false, ok = false;
+  ID3D12Device5* dev5 = nullptr;
+  ID3D12GraphicsCommandList4* list4 = nullptr;
+  ID3D12RootSignature* root = nullptr;
+  ID3D12PipelineState* pso = nullptr;
+  ID3D12RootSignature* cs_root = nullptr;  // limpeza dos vértices antes da BLAS
+  ID3D12PipelineState* cs_pso = nullptr;
+  ID3D12Resource *so = nullptr, *blas = nullptr, *tlas = nullptr, *scratch = nullptr,
+                 *instances = nullptr;
+  D3D12_RESOURCE_STATES so_state = D3D12_RESOURCE_STATE_COMMON;
+  static constexpr uint32_t kMaxVerts = 6u * 1024 * 1024;  // 2 M triângulos (72 MB); o corredor tem ~1,1 M
+  uint32_t verts = 0;          // vértices escritos neste frame (contados no CPU)
+  bool capturing = false;      // SO ligado neste frame (até ao hook dos efeitos)
+  bool frame_done = false;     // o hook deste frame já passou: não há mais captura
+  bool built = false;          // BLAS/TLAS deste frame prontos
+  uint32_t stat_draws = 0, stat_verts = 0, stat_builds = 0;
+  // Tempo de GPU: 4 timestamps por frame (antes/depois da BLAS+TLAS, antes/depois do passe RayQuery), lidos 2 frames depois.
+  ID3D12QueryHeap* qh = nullptr;
+  ID3D12Resource* qread = nullptr;
+  uint64_t freq = 0;
+  double build_ms = 0, pass_ms = 0;
+  uint32_t timed = 0;
+};
+RtState g_rt;
+
+ID3D12Resource* rt_buffer(uint64_t size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES st, bool uav) {
+  D3D12_RESOURCE_DESC d{};
+  d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  d.Width = size;
+  d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+  d.SampleDesc.Count = 1;
+  d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  d.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+  auto hp = heap(type);
+  ID3D12Resource* r = nullptr;
+  if (FAILED(g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, st, nullptr, IID_PPV_ARGS(&r)))) return nullptr;
+  return r;
+}
+
+D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS rt_blas_inputs(D3D12_RAYTRACING_GEOMETRY_DESC& geo, uint32_t verts) {
+  geo = {};
+  geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+  geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+  geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+  geo.Triangles.VertexCount = verts;
+  geo.Triangles.VertexBuffer.StartAddress = g_rt.so ? g_rt.so->GetGPUVirtualAddress() : 0;
+  geo.Triangles.VertexBuffer.StrideInBytes = 12;
+  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+  in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+  static const bool fast_trace = std::getenv("GOW_RT_FAST_TRACE") != nullptr;
+  in.Flags = fast_trace ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
+                        : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+  in.NumDescs = 1;
+  in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+  in.pGeometryDescs = &geo;
+  return in;
+}
+
+bool rt_init() {
+  if (g_rt.tried) return g_rt.ok;
+  g_rt.tried = true;
+  if (!g_root_so || FAILED(g.device->QueryInterface(IID_PPV_ARGS(&g_rt.dev5))) ||
+      FAILED(g.list->QueryInterface(IID_PPV_ARGS(&g_rt.list4)))) {
+    std::fprintf(stderr, "[rt] DXR indisponível\n");
+    return false;
+  }
+  D3D12_ROOT_PARAMETER rp[3] = {};
+  rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  rp[0].Constants = {0, 0, 16};
+  rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  for (int i = 1; i < 3; i++) {
+    rp[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rp[i].Descriptor = {(UINT)(i - 1), 0};
+    rp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  }
+  D3D12_ROOT_SIGNATURE_DESC rd{3, rp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  ID3DBlob *blob = nullptr, *err = nullptr;
+  if (FAILED(g.serialize_rs(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err)) ||
+      FAILED(g.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g_rt.root)))) {
+    std::fprintf(stderr, "[rt] root signature falhou\n");
+    return false;
+  }
+  blob->Release();
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
+  d.pRootSignature = g_rt.root;
+  d.VS = {kRtVs, sizeof kRtVs};
+  d.PS = {kRtPs, sizeof kRtPs};
+  // Só o alfa (visibilidade) do buffer dos efeitos, multiplicado: junta-se ao GTAO se também estiver ligado.
+  auto& b = d.BlendState.RenderTarget[0];
+  b.BlendEnable = TRUE;
+  b.SrcBlend = D3D12_BLEND_ONE, b.DestBlend = D3D12_BLEND_ZERO, b.BlendOp = D3D12_BLEND_OP_ADD;
+  b.SrcBlendAlpha = D3D12_BLEND_ZERO, b.DestBlendAlpha = D3D12_BLEND_SRC_ALPHA, b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+  b.LogicOp = D3D12_LOGIC_OP_NOOP;
+  b.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALPHA;
+  d.SampleMask = ~0u;
+  d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  d.RasterizerState.DepthClipEnable = TRUE;
+  d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  d.NumRenderTargets = 1;
+  d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  d.SampleDesc.Count = 1;
+  if (FAILED(g.device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_rt.pso)))) {
+    std::fprintf(stderr, "[rt] PSO do RayQuery falhou\n");
+    return false;
+  }
+  {
+    // Vértices não finitos ou enormes (VS do jogo com w = 0, ossos escondidos, memória ainda não escrita) passam a NaN: o
+    // triângulo fica inativo, como define a especificação. Com Inf ou 1e30 nas caixas a construção da BLAS chegou a pendurar a GPU.
+    static const char kSanitize[] =
+        "RWByteAddressBuffer v : register(u0);\n"
+        "cbuffer C : register(b0) { uint n; };\n"
+        "[numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {\n"
+        "  if (id.x >= n) return;\n"
+        "  float3 p = asfloat(v.Load3(id.x * 12));\n"
+        "  if (!all(abs(p) < 1e6)) v.Store3(id.x * 12, uint3(0x7FC00000, 0x7FC00000, 0x7FC00000));\n"
+        "}\n";
+    std::string e;
+    ID3DBlob* cs = compile_hlsl(kSanitize, "cs_5_0", "rt_sanitize", &e);
+    D3D12_ROOT_PARAMETER cp[2] = {};
+    cp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    cp[0].Constants = {0, 0, 1};
+    cp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    cp[1].Descriptor = {0, 0};
+    D3D12_ROOT_SIGNATURE_DESC crd{2, cp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ID3DBlob* cblob = nullptr;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+    if (!cs || FAILED(g.serialize_rs(&crd, D3D_ROOT_SIGNATURE_VERSION_1, &cblob, &err)) ||
+        FAILED(g.device->CreateRootSignature(0, cblob->GetBufferPointer(), cblob->GetBufferSize(), IID_PPV_ARGS(&g_rt.cs_root)))) {
+      std::fprintf(stderr, "[rt] compute de limpeza falhou: %s\n", e.c_str());
+      return false;
+    }
+    cd.pRootSignature = g_rt.cs_root;
+    cd.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+    if (FAILED(g.device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&g_rt.cs_pso)))) {
+      std::fprintf(stderr, "[rt] PSO de limpeza falhou\n");
+      return false;
+    }
+  }
+  D3D12_RAYTRACING_GEOMETRY_DESC geo;
+  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = rt_blas_inputs(geo, RtState::kMaxVerts);
+  D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bi{}, ti{};
+  g_rt.dev5->GetRaytracingAccelerationStructurePrebuildInfo(&in, &bi);
+  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tin{};
+  tin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+  tin.NumDescs = 1;
+  tin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+  g_rt.dev5->GetRaytracingAccelerationStructurePrebuildInfo(&tin, &ti);
+  const D3D12_RESOURCE_STATES as = D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+  g_rt.so = rt_buffer(12ull * RtState::kMaxVerts, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true);
+  g_rt.blas = rt_buffer(bi.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, as, true);
+  g_rt.tlas = rt_buffer(ti.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, as, true);
+  g_rt.scratch = rt_buffer(std::max(bi.ScratchDataSizeInBytes, ti.ScratchDataSizeInBytes), D3D12_HEAP_TYPE_DEFAULT,
+                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
+  g_rt.instances = rt_buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
+  if (!g_rt.so || !g_rt.blas || !g_rt.tlas || !g_rt.scratch || !g_rt.instances) {
+    std::fprintf(stderr, "[rt] sem memória para as estruturas de aceleração\n");
+    return false;
+  }
+  void* m = nullptr;
+  D3D12_RAYTRACING_INSTANCE_DESC inst{};
+  inst.Transform[0][0] = inst.Transform[1][1] = inst.Transform[2][2] = 1.0f;
+  inst.InstanceMask = 0xFF;
+  inst.AccelerationStructure = g_rt.blas->GetGPUVirtualAddress();
+  g_rt.instances->Map(0, nullptr, &m);
+  std::memcpy(m, &inst, sizeof inst);
+  g_rt.instances->Unmap(0, nullptr);
+  D3D12_QUERY_HEAP_DESC qd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 4 * 4, 0};
+  if (SUCCEEDED(g.device->CreateQueryHeap(&qd, IID_PPV_ARGS(&g_rt.qh)))) {
+    g_rt.qread = rt_buffer(4 * 4 * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false);
+    g.queue->GetTimestampFrequency(&g_rt.freq);
+  }
+  std::fprintf(stderr, "[rt] DXR 1.1 pronto: BLAS até %u triângulos (%.0f MB), TLAS %.1f KB\n", RtState::kMaxVerts / 3,
+               bi.ResultDataMaxSizeInBytes / 1048576.0, ti.ResultDataMaxSizeInBytes / 1024.0);
+  return g_rt.ok = true;
+}
+
+// Primeiro desenho capturado do frame: o buffer das posições passa a UAV (os VS escrevem nele, xe_capture).
+void rt_begin_capture() {
+  transition(g_rt.so, g_rt.so_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  g_rt.capturing = true;
+  g_rt.verts = 0;
+}
+
+void rt_stop_capture() { g_rt.capturing = false; }
+
+// Timestamps: bloco de 4 por frame em 4 blocos rotativos; o bloco do frame N é lido no frame N + 2 (já executado).
+void rt_stamp(uint32_t i) {
+  if (g_rt.qh && g_rt.qread) g.list->EndQuery(g_rt.qh, D3D12_QUERY_TYPE_TIMESTAMP, (uint32_t)(g.frame % 4) * 4 + i);
+}
+void rt_read_stamps() {
+  if (!g_rt.qh || !g_rt.qread || g.frame < 2) return;
+  const uint32_t b = (uint32_t)((g.frame - 2) % 4) * 4;
+  uint64_t* t = nullptr;
+  D3D12_RANGE r{b * 8, b * 8 + 32};
+  if (FAILED(g_rt.qread->Map(0, &r, reinterpret_cast<void**>(&t)))) return;
+  const uint64_t a0 = t[b], a1 = t[b + 1], a2 = t[b + 2], a3 = t[b + 3];
+  D3D12_RANGE none{0, 0};
+  g_rt.qread->Unmap(0, &none);
+  if (a1 > a0 && a3 > a2 && a0) {
+    g_rt.build_ms += (a1 - a0) * 1000.0 / g_rt.freq;
+    g_rt.pass_ms += (a3 - a2) * 1000.0 / g_rt.freq;
+    g_rt.timed++;
+  }
+}
+void rt_resolve_stamps() {
+  if (!g_rt.qh || !g_rt.qread) return;
+  const uint32_t b = (uint32_t)(g.frame % 4) * 4;
+  g.list->ResolveQueryData(g_rt.qh, D3D12_QUERY_TYPE_TIMESTAMP, b, 4, g_rt.qread, b * 8);
+}
+
+// No hook dos efeitos: o que foi capturado vira BLAS + TLAS.
+bool rt_build() {
+  g_rt.built = false;
+  const bool had = g_rt.capturing;
+  rt_stop_capture();
+  g_rt.frame_done = true;
+  static const bool no_build = std::getenv("GOW_RT_NO_BUILD") != nullptr;  // diagnóstico: só o stream-out
+  if (!had || g_rt.verts < 3 || no_build) return false;
+  g_rt.stat_verts += g_rt.verts;
+  rt_stamp(0);
+  const uint32_t n = g_rt.verts / 3 * 3;
+  {
+    D3D12_RESOURCE_BARRIER ub{};
+    ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    ub.UAV.pResource = g_rt.so;  // escritas dos VS antes da limpeza
+    g.list->ResourceBarrier(1, &ub);
+  }
+  g.list->SetComputeRootSignature(g_rt.cs_root);
+  g.list->SetPipelineState(g_rt.cs_pso);
+  g.list->SetComputeRoot32BitConstant(0, n, 0);
+  g.list->SetComputeRootUnorderedAccessView(1, g_rt.so->GetGPUVirtualAddress());
+  g.list->Dispatch((n + 255) / 256, 1, 1);
+  invalidate_bound();
+  transition(g_rt.so, g_rt.so_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  D3D12_RAYTRACING_GEOMETRY_DESC geo;
+  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+  bd.Inputs = rt_blas_inputs(geo, n);
+  bd.DestAccelerationStructureData = g_rt.blas->GetGPUVirtualAddress();
+  bd.ScratchAccelerationStructureData = g_rt.scratch->GetGPUVirtualAddress();
+  g_rt.list4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+  D3D12_RESOURCE_BARRIER u[2] = {};
+  u[0].Type = u[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  u[0].UAV.pResource = g_rt.blas;
+  u[1].UAV.pResource = g_rt.scratch;
+  g.list->ResourceBarrier(2, u);
+  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC td{};
+  td.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+  td.Inputs.NumDescs = 1;
+  td.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+  td.Inputs.InstanceDescs = g_rt.instances->GetGPUVirtualAddress();
+  td.DestAccelerationStructureData = g_rt.tlas->GetGPUVirtualAddress();
+  td.ScratchAccelerationStructureData = g_rt.scratch->GetGPUVirtualAddress();
+  g_rt.list4->BuildRaytracingAccelerationStructure(&td, 0, nullptr);
+  u[0].UAV.pResource = g_rt.tlas;
+  g.list->ResourceBarrier(2, u);
+  rt_stamp(1);
+  g_rt.stat_builds++;
+  return g_rt.built = true;
+}
+
+// Fim do frame: captura que não chegou ao hook (menus, cenas sem resolve da cena) fica sem uso.
+void rt_end_frame() {
+  rt_read_stamps();
+  rt_stop_capture();
+  g_rt.frame_done = false;
+  g_rt.built = false;
+}
+
 struct FxState {
   bool tried = false, ok = false;
   ID3D12RootSignature* root = nullptr;
@@ -1473,7 +1991,8 @@ void fx_pass(int which, float vx, float vy, float vw, float vh, const D3D12_CPU_
 }
 
 // Região (sx, sy, w, h) do RT em coordenadas lógicas da EDRAM; (x, y) a mesma região no ecrã.
-void fx_apply(Texture& scene, Texture& depth, float sx, float sy, float w, float h, float x, float y) {
+uint32_t g_rt_passes = 0;
+void fx_apply(Texture& scene, Texture& depth, float sx, float sy, float w, float h, float x, float y, bool rt) {
   const config::Config& cfg = config::get();
   if (!fx_init()) return;
   Phase ph("efeitos de ecrã");
@@ -1505,6 +2024,25 @@ void fx_apply(Texture& scene, Texture& depth, float sx, float sy, float w, float
   transition(g.dummy, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
   invalidate_bound();
   fx_pass(0, 0, 0, (float)bw, (float)bh, g_fx.buf.rtv, g_fx.color, depth, g.dummy, c);
+  static const int rt_rays_env = std::getenv("GOW_RT_RAYS") ? std::atoi(std::getenv("GOW_RT_RAYS")) : -1;
+  static const bool rt_no_pass = std::getenv("GOW_RT_NO_PASS") != nullptr;
+  if (rt && !rt_no_pass) {  // AO com raios: multiplica a visibilidade do buffer dos efeitos
+    float rc[16];
+    std::memcpy(rc, c, sizeof rc);
+    rc[11] = 120.0f;  // raio em unidades do jogo (o Marcus mede ~180)
+    rc[12] = 0.85f, rc[13] = rt_rays_env >= 0 ? (float)rt_rays_env : k > 1 ? 6.0f : 3.0f, rc[14] = rc[15] = 0;
+    g.list->SetPipelineState(g_rt.pso);
+    g.list->SetGraphicsRootSignature(g_rt.root);
+    g.list->SetGraphicsRoot32BitConstants(0, 16, rc, 0);
+    g.list->SetGraphicsRootShaderResourceView(1, g_rt.tlas->GetGPUVirtualAddress());
+    g.list->SetGraphicsRootShaderResourceView(2, g_rt.so->GetGPUVirtualAddress());
+    g.list->OMSetRenderTargets(1, &g_fx.buf.rtv, FALSE, nullptr);
+    rt_stamp(2);
+    g.list->DrawInstanced(3, 1, 0, 0);
+    rt_stamp(3);
+    rt_resolve_stamps();
+    g_rt_passes++;
+  }
   transition(g_fx.buf, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
   transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET);
   fx_pass(1, ox, oy, (float)rw, (float)rh, scene.rtv, g_fx.color, depth, g_fx.buf, c);
@@ -1864,8 +2402,8 @@ uint64_t dxbc_id(ID3DBlob* b) {
 ID3D12PipelineState* create_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, uint64_t key, ID3DBlob* vs, ID3DBlob* ps) {
   PsoLibrary& L = g_pso_lib;
   wchar_t name[64];
-  swprintf(name, 64, L"%016llX-%016llX-%016llX", (unsigned long long)key, (unsigned long long)dxbc_id(vs),
-           (unsigned long long)dxbc_id(ps));
+  swprintf(name, 64, L"%016llX-%016llX-%016llX%ls", (unsigned long long)key, (unsigned long long)dxbc_id(vs),
+           (unsigned long long)dxbc_id(ps), L"");
   ID3D12PipelineState* pso = nullptr;
   if (L.lib) {
     std::lock_guard<std::mutex> lock(L.mu);
@@ -2097,7 +2635,7 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc(ID3DBlob* vs, ID3DBlob* ps, const Dr
                                : (s.cull & 1) ? D3D12_CULL_MODE_FRONT
                                               : D3D12_CULL_MODE_NONE;
   d.RasterizerState.FrontCounterClockwise = (s.cull & 4) ? FALSE : TRUE;
-  d.RasterizerState.DepthClipEnable = s.depth_clip ? TRUE : FALSE;
+  d.RasterizerState.DepthClipEnable = (s.depth_clip & 1) ? TRUE : FALSE;
   uint32_t dc = s.depth_control;
   if (s.dsv != DXGI_FORMAT_UNKNOWN) {
     d.DepthStencilState.DepthEnable = (dc >> 1) & 1;
@@ -2253,6 +2791,7 @@ struct SysConstants {
   float rt_scale[4];  // 2^color_exp_bias de cada RT (RB_COLOR*_INFO bits 20..25, com sinal)
   float rt_max[4];    // 31,875 nos RT 2_10_10_10_FLOAT (7e3); 0 nos outros
   float res[4];       // lógico/host
+  uint32_t capture[4];  // DXR: x = gravar posições, y = 1.º vértice no buffer (xe_capture)
 };
 
 const uint8_t* physical(uint32_t addr) { return gm::base() + 0xA0000000u + (gpu_physical(addr) & 0x1FFFFFFFu); }
@@ -2374,9 +2913,10 @@ void resolve() {
   } else if (!depth && g_fx.after_depth && x1 - x0 >= 1200.0f && y1 - y0 >= 64.0f && src->format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
     g_fx.after_depth = false;
     const config::Config& fc = config::get();
-    if (fc.gtao || fc.ssrtgi || fc.ssr)
+    const bool rt = g_rt.capturing && rt_build();
+    if (fc.gtao || fc.ssrtgi || fc.ssr || rt)
       if (Texture* dt = render_target(dinfo & 0xFFF, 0, pitch, true, (uint32_t)sy1))
-        fx_apply(*src, *dt, sx0, sy0, sx1 - sx0, sy1 - sy0, x0, y0);
+        fx_apply(*src, *dt, sx0, sy0, sx1 - sx0, sy1 - sy0, x0, y0, rt);
   }
   if (g.dump_resolves && g.dump_frames.count(g.frame) && sx1 > sx0 && sy1 > sy0) {  // GOW_DUMP_RESOLVES=1
     Texture tmp;
@@ -2436,7 +2976,15 @@ void resolve() {
           break;
         }
       }
+      if (t && row == 0) t = nullptr;  // o mesmo endereço outra vez: é uma cópia nova, não uma continuação
       if (t && t->pend_dst) flush_pending_dst(t);  // continuação (2.º tile) de uma cópia ainda pendente
+      if (t && t->alias) materialize(*t);
+      const float S = g.scale;
+      const uint32_t swz = !depth && ((info >> 24) & 1) ? kSwizzleSwapRB : kSwizzleIdentity;  // copy_dest_swap
+      // Alias possível: região na origem do RT e do destino, mesmo formato, sem expoente (cor) / cópia R32F da profundidade.
+      const bool zc_ok = config::get().zero_copy && !g.resolve_to_memory && !(g.dump_resolves && g.dump_frames.count(g.frame)) &&
+                         !t && sx0 == 0 && sy0 == 0 && w * S <= src->width && h * S <= src->height &&
+                         (is_depth_copy ? src->depth : (!depth && mode == kColor && bias == 0 && tf == src->format));
       if (!t) {
         t = &g.resolved[{dphys, (uint32_t)tf}];
         if (t->pend_dst) {
@@ -2455,13 +3003,31 @@ void resolve() {
             }
           if (!dropped) flush_pending_dst(t);
         }
-        if (t->res && (t->width < tw || t->height < th)) g.garbage.push_back(t->res), t->res = nullptr;
-        if (!t->res && !create_texture(*t, tw, th, tf, true, false)) t = nullptr;
+        if (zc_ok) {
+          alias_to(*t, *src, w * S, h * S, tw, th, tf, mode, is_depth_copy ? 0u : swz);
+          t->guest_pitch = dest_pitch, t->guest_bpp = bpp, t->depth_copy = is_depth_copy;
+          t->frame = g.frame;
+          t->serial = ++g.resolve_serial;
+          if (t->read) g_rs_read++;
+          else g_rs_unread++;
+          t->read = false;
+          return;
+        }
+        if (t->alias) {  // o novo conteúdo não cobre o alias inteiro: primeiro a cópia
+          if (w * S >= t->alias_w && h * S >= t->alias_h) unalias(*t);
+          else materialize(*t);
+        }
+        if (t->res && !t->has_rtv && !t->depth && t->format == tf) {  // recurso recebido no ping-pong: só falta o RTV
+          if (!copy_target(*t, tw, th, tf)) t = nullptr;
+        } else {
+          if (t->res && (t->width < tw || t->height < th || t->format != tf || t->depth || !t->has_rtv))
+            pool_put(t->res, t->state, t->width, t->height, t->format, t->depth), t->res = nullptr;
+          t->view_swz = kSwizzleIdentity;
+          if (!t->res && !copy_target(*t, tw, th, tf)) t = nullptr;
+        }
         if (t) t->guest_pitch = dest_pitch, t->guest_bpp = bpp, t->depth_copy = is_depth_copy;
       }
       if (!t) return;
-      const float S = g.scale;
-      const uint32_t swz = !depth && ((info >> 24) & 1) ? kSwizzleSwapRB : kSwizzleIdentity;  // copy_dest_swap
       const bool defer = config::get().zero_copy && !g.resolve_to_memory && !(g.dump_resolves && g.dump_frames.count(g.frame)) &&
                          !t->pend_dst && src->pend_src < 64;
       if (defer) {
@@ -2471,6 +3037,7 @@ void resolve() {
       } else {
         blit(*src, t->res, t->state, t->rtv, tf, sx0 * S, sy0 * S, w * S, h * S, 0, (float)scaled((float)row), w * S, h * S, false,
              mode, false, std::ldexp(1.0f, bias), swz);
+        g_resolve_copies++;
       }
       t->frame = g.frame;
       t->serial = ++g.resolve_serial;
@@ -2500,7 +3067,9 @@ void resolve() {
     if (c) {
       uint32_t v = reg(kRbColorClear);
       float col[4] = {((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, (v & 0xFF) / 255.0f, (v >> 24) / 255.0f};
+      g_clear_target = c, g_clear_rect = rc;
       transition(*c, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      g_clear_target = nullptr;
       g.list->ClearRenderTargetView(c->rtv, col, 1, &rc);
     }
   }
@@ -2508,7 +3077,9 @@ void resolve() {
     Texture* d = render_target(dinfo & 0xFFF, 0, pitch, true, (uint32_t)sy1);
     if (d) {
       uint32_t v = reg(kRbDepthClear);
+      g_clear_target = d, g_clear_rect = rc;
       transition(*d, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      g_clear_target = nullptr;
       g.list->ClearDepthStencilView(d->dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                     (float)(v >> 8) / 16777215.0f, (UINT8)(v & 0xFF), 1, &rc);
     }
@@ -2593,9 +3164,20 @@ bool init_device() {
   if (!g.create_device || !g.serialize_rs || !g.create_factory || !g.compile) return false;
   if (const char* e = std::getenv("GOW_D3D12_DEBUG"); e && *e == '1') {
     using PFN_GetDebug = HRESULT(WINAPI*)(REFIID, void**);
-    auto get_debug = reinterpret_cast<PFN_GetDebug>(sym(g.d3d12, "D3D12GetDebugInterface"));
+    auto get_debug = reinterpret_cast<PFN_GetDebug>(sym(g.d3d12, "D3D12GetDebugInterface"));  // (GOW_D3D12_DEBUG)
     ID3D12Debug* dbg = nullptr;
     if (get_debug && SUCCEEDED(get_debug(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer(), dbg->Release();
+  }
+  if (std::getenv("GOW_DRED")) {
+    using PFN_GetDebug2 = HRESULT(WINAPI*)(REFIID, void**);
+    auto get_debug2 = reinterpret_cast<PFN_GetDebug2>(sym(g.d3d12, "D3D12GetDebugInterface"));
+    ID3D12DeviceRemovedExtendedDataSettings* ds = nullptr;
+    if (get_debug2 && SUCCEEDED(get_debug2(IID_PPV_ARGS(&ds)))) {
+      ds->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      ds->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      ds->Release();
+      std::fprintf(stderr, "[dred] ligado\n");
+    }
   }
   if (FAILED(g.create_factory(0, IID_PPV_ARGS(&g.factory)))) return false;
   if (FAILED(g.create_device(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g.device)))) {
@@ -2810,13 +3392,17 @@ bool try_clear(uint32_t num, bool first_tile) {
       if (key.depth) {
         D3D12_CLEAR_FLAGS fl = (D3D12_CLEAR_FLAGS)((clear_z ? D3D12_CLEAR_FLAG_DEPTH : 0) | (clear_s ? D3D12_CLEAR_FLAG_STENCIL : 0));
         if (!fl) continue;
+        g_clear_target = &t, g_clear_rect = c;
         transition(t, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        g_clear_target = nullptr;
         g.list->ClearDepthStencilView(t.dsv, fl, z, (UINT8)(st_reg & 0xFF), 1, &c);
       } else if (dbase == cbase && key.format == color_rt_dxgi((reg(kRbColorInfo) >> 16) & 0xF)) {
         // A palavra de profundidade é a cor deste RT. Só o formato declarado: a mesma base serve várias superfícies
         // (a cena HDR em R16F é guardada e restaurada pelo jogo em volta do buffer de atenuação 8888); aqui são
         // recursos separados, e limpar todos apagava a cena.
+        g_clear_target = &t, g_clear_rect = c;
         transition(t, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        g_clear_target = nullptr;
         g.list->ClearRenderTargetView(t.rtv, color, 1, &c);
       }
     }
@@ -2991,6 +3577,14 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     g.skipped++;
     return;
   }
+  // DXR: desenhos opacos da cena principal (escrevem cor e profundidade no buffer de ecrã inteiro, sem deslocamento de tile) gravam
+  // as posições pós-VS no buffer do ray tracing até ao hook dos efeitos (xe_capture; o stream-out pendurava a GPU no driver da AMD).
+  bool rt_capture = false;
+  if (config::get().raytracing && g_root_so && !g_rt.frame_done && depth && st.topology == D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE &&
+      prim != 8 && ((st.depth_control >> 1) & 3) == 3 && st.num_rt && (st.color_mask & 0xF) && pitch == kWidth && depth->width >= scaled((float)kWidth) &&
+      !((reg(kPaSuScModeCntl) >> 16) & 1 && reg(kPaScWindowOffset)) && rt_init()) {
+    rt_capture = true;
+  }
   ID3D12PipelineState* pso = pipeline(vs, ps, st);
   if (!pso) {
     g.skipped++;
@@ -3111,7 +3705,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   for (uint32_t k = 0; k < 32; k++) {
     if (!(used_tex & (1u << k))) continue;
     const D3D12_SAMPLER_DESC& sd = slot_smp[k];
-    srv_key = srv_key * 0x100000001B3ull ^ (uint64_t)(uintptr_t)slot_tex[k]->res;
+    srv_key = srv_key * 0x100000001B3ull ^ (uint64_t)(uintptr_t)slot_tex[k]->res ^ (uint64_t)slot_tex[k]->view_swz << 52;
     smp_key = smp_key * 0x100000001B3ull ^ (uint64_t)sd.Filter ^ (uint64_t)sd.AddressU << 12 ^ (uint64_t)sd.AddressV << 18 ^
               (uint64_t)sd.MaxAnisotropy << 24;
   }
@@ -3232,6 +3826,12 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     std::memcpy(bl + 8, cr + (kConstLoop - 0x4000), 32 * 4);
     cb_bools = upload_regs_cached(g.cc_bools, kConstGenBool, bl, sizeof bl);
   }
+  if (rt_capture && host_count % 3 == 0 && g_rt.verts + host_count <= RtState::kMaxVerts) {
+    if (!g_rt.capturing) rt_begin_capture();
+    sys.capture[0] = 1, sys.capture[1] = g_rt.verts;
+  } else {
+    rt_capture = false;
+  }
   D3D12_GPU_VIRTUAL_ADDRESS cb_sys = upload_cached(g.cc_sys, &sys, sizeof sys);
   // O cbuffer declara as 64 entradas: reserva-as todas, copia só as usadas (o resto da reserva nunca é lido).
   D3D12_GPU_VIRTUAL_ADDRESS cb_vf = upload_cached(g.cc_vf, vf, (size_t)vf_entries * 16, sizeof vf);
@@ -3293,6 +3893,14 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
   if (sc.right <= sc.left || sc.bottom <= sc.top) sc = {0, 0, (LONG)first->width, (LONG)first->height};
   if (!same_bytes(&g.bound_scissor, &sc, sizeof sc)) g.list->RSSetScissorRects(1, &sc), g.bound_scissor = sc;
   if (g.bound_topo != topo) g.list->IASetPrimitiveTopology(topo), g.bound_topo = topo;
+  {
+    const D3D12_GPU_VIRTUAL_ADDRESS uav = rt_capture ? g_rt.so->GetGPUVirtualAddress() : g_dummy_uav->GetGPUVirtualAddress();
+    if (g_bound_uav != uav) g.list->SetGraphicsRootUnorderedAccessView(10, uav), g_bound_uav = uav;
+  }
+  if (rt_capture) {
+    g_rt.verts += host_count;
+    g_rt.stat_draws++;
+  }
   g.list->DrawInstanced(host_count, 1, 0, 0);
   g.draws++;
   // GOW_TRACE_AFTER_RESOLVE=N: só os desenhos depois do resolve N (passes de pós-processamento), com estado.
@@ -3408,6 +4016,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   g.tex_lookup.clear();
   g.desc_cache.clear();  // frame novo: a memória das texturas volta a ser verificada
   g_fx.after_depth = false;
+  rt_end_frame();
   // Ecrãs com poucos desenhos (título, carregamento) e shaders ainda a preparar (a preparação do launcher que continuou no jogo,
   // ou o varrimento da memória): espera aqui com uma barra no ecrã, em vez de entrar no nível com shaders em falta. Em jogo
   // nunca espera: o que falta compila em fundo e passa à frente quando um desenho o pede. GOW_NO_PREBUILD_WAIT=1 desliga.
@@ -3580,9 +4189,19 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
                    g_pso_pool.skipped.exchange(0));
     }
     std::fprintf(stderr, "[gfx] em 120 frames: %u samplers anisotrópicos (por desenho), resolves: %u cópias lidas, %u reescritas sem "
-                         "leitura, %u passes de efeitos de ecrã; zero-copy: %u cópias evitadas, %u adiadas e feitas\n",
-                 g_aniso_samplers, g_rs_read, g_rs_unread, g_fx_passes, g_zc_saved, g_zc_done);
+                         "leitura, %u passes de efeitos de ecrã; zero-copy: %u cópias evitadas, %u adiadas e feitas, %u aliases, "
+                         "%u trocas de recurso (ping-pong), %u aliases copiados; %u cópias de resolve feitas (%.2f por frame)\n",
+                 g_aniso_samplers, g_rs_read, g_rs_unread, g_fx_passes, g_zc_saved, g_zc_done, g_zc_alias, g_zc_swap, g_zc_mat,
+                 g_resolve_copies, g_resolve_copies / 120.0);
     g_aniso_samplers = g_rs_read = g_rs_unread = g_fx_passes = g_zc_saved = g_zc_done = 0;
+    g_zc_alias = g_zc_swap = g_zc_mat = g_resolve_copies = 0;
+    if (g_rt.ok)
+      std::fprintf(stderr, "[rt] em 120 frames: %u desenhos capturados, %.0f mil triângulos por frame, %u BLAS, %u passes RayQuery; "
+                           "GPU: BLAS+TLAS %.2f ms, raios %.2f ms por frame\n",
+                   g_rt.stat_draws, g_rt.stat_builds ? g_rt.stat_verts / 3.0 / g_rt.stat_builds / 1000.0 : 0.0, g_rt.stat_builds,
+                   g_rt_passes, g_rt.timed ? g_rt.build_ms / g_rt.timed : 0.0, g_rt.timed ? g_rt.pass_ms / g_rt.timed : 0.0);
+    g_rt.build_ms = g_rt.pass_ms = 0, g_rt.timed = 0;
+    g_rt.stat_draws = g_rt.stat_verts = g_rt.stat_builds = g_rt_passes = 0;
     g.stat_worst_ms = 0;
     g.stat_slow_frames = 0;
     g.stat_submits = g.stat_creates = 0;
@@ -3629,6 +4248,7 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
   // ResolutionScale mudou no menu F8: as superfícies são recriadas no novo tamanho a partir do próximo frame.
   if (const float want = config::get().resolution_scale; want != g.scale) {
     flush_all_pending();
+    drop_all_aliases();
     submit(true);
     submit(true);
     {

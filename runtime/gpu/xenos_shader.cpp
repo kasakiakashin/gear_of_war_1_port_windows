@@ -44,6 +44,7 @@ cbuffer XeSystem : register(b3) {
   float4 xe_rt_scale;    // 2^color_exp_bias por RT
   float4 xe_rt_max;      // > 0: o formato real do RT é 7e3 (limitado a [0, 31,875]), guardado aqui em 16 bits float
   float4 xe_res;         // x = y = lógico/host (1/ResolutionScale): os shaders veem sempre coordenadas 1280×720
+  uint4 xe_capture;      // VS: x = 1 grava a posição de recorte (x, y, w) de cada vértice em xe_rtpos a partir do vértice y (DXR)
 };
 uint xe_fetch_dw(uint i) { return xe_fetch[i >> 2][i & 3]; }
 // rcp(0) e afins dão infinito: no formato 7e3 do Xenos isso fica em 31,875, mas em 16 bits float passava ao bloom e ao DOF
@@ -796,6 +797,8 @@ class Translator {
       // Vértices: todos no anel de upload; xe_vf diz onde está cada stream (ver emit_vfetch_bound; nos VS de formatos fixos,
       // uma entrada por slot em vfetch_slots).
       h += "ByteAddressBuffer xe_ring : register(t1, space1);\n";
+      // Geometria para o ray tracing: posição pós-VS de cada vértice, escrita só nos desenhos que o renderer captura.
+      h += "RWByteAddressBuffer xe_rtpos : register(u0, space1);\n";
       h += fmt("cbuffer XeVfetch : register(b4) { uint4 xe_vf[%zu]; };\n", kMaxBoundVfetch);
       h += "struct VSRaw { float4 pos; float4 o[16]; float4 misc; };\n";
       h += "struct VSOut { float4 pos : SV_Position; float4 o[16] : TEXCOORD0; };\n";
@@ -837,6 +840,7 @@ VSOut main(uint vid : SV_VertexID) {
   float z = q.z * ((vte & 0x10u) ? xe_vp_scale.z : 1.0) + ((vte & 0x20u) ? xe_vp_offset.z : 0.0) * w;
   o.pos = float4(sp.x * xe_rt.x - w, w - sp.y * xe_rt.y, z, w);
   [unroll] for (uint i = 0; i < 16; i++) o.o[i] = raw.o[i];
+  if (xe_capture.x) xe_rtpos.Store3((xe_capture.y + vid) * 12u, asuint(float3(o.pos.x, o.pos.y, w)));
   return o;
 }
 )";

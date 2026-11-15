@@ -38,8 +38,8 @@ struct Config {
   bool ssr = false;                 // reflexos em espaço de ecrã
   float ssr_intensity = 0.4f;
   bool ss_half_res = true;          // efeitos de ecrã a meia resolução com upsample bilateral
-  bool raytracing = false;          // DXR 1.1 (só indicador; ver d3d12_renderer.cpp)
-  bool zero_copy = true;            // resolves cujo destino nunca é lido não são copiados
+  bool raytracing = false;          // DXR 1.1: AO com raios sobre a geometria pós-VS (stream-out)
+  bool zero_copy = false;           // resolves por alias do RT com copy-on-write (mais lento neste jogo)
   std::string player_name;  // nome no jogo (vazio = "Player")
   bool tunnel_host = false;  // anfitrião do túnel P2P no arranque
   std::string join_tunnel;   // gow://join/… do anfitrião

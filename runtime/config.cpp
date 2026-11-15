@@ -60,10 +60,10 @@ const char kDefaults[] =
     "SSRIntensity=0.40\n"
     "; 1 = efeitos de ecra a meia resolucao com upsample bilateral (mais leve).\n"
     "ScreenSpaceHalfRes=1\n"
-    "; DXR 1.1 (RayQuery): so e detetado, ver README.\n"
+    "; DXR 1.1 (RayQuery): oclusao ambiente com raios sobre a geometria da cena. So em GPUs com DXR 1.1.\n"
     "RayTracing=0\n"
-    "; 1 = resolves cujo destino e reescrito antes de ser lido nao sao copiados.\n"
-    "ZeroCopyResolves=1\n"
+    "; 1 = resolves sem copia (a textura e o proprio render target, com copy-on-write). Mais lento neste jogo; ver README.\n"
+    "ZeroCopyResolves=0\n"
     "[Input]\n"
     "; Sensibilidade do rato (mira).\n"
     "MouseSensitivity=1.0\n"
@@ -299,9 +299,8 @@ void apply_preset(Config& c, int p, bool raytracing_available) {
   c.ssrtgi = x.gi, c.ssrtgi_intensity = x.gi_i;
   c.ssr = x.ssr, c.ssr_intensity = x.ssr_i;
   c.ss_half_res = x.half;
-  c.raytracing = false;  // só deteção por agora (ver README)
-  (void)x.rt, (void)raytracing_available;
-  c.zero_copy = true;
+  c.raytracing = x.rt && raytracing_available;
+  c.zero_copy = false;
   c.preset = preset_key(p);
 }
 

@@ -209,7 +209,7 @@ void build_video(HWND h) {
 
 const wchar_t* dxr_text() {
   const int tier = gpu::render::raytracing_tier();
-  if (tier >= 11) return L"DXR 1.1 disponível nesta GPU. Efeitos com raios ainda não implementados neste port (ver README).";
+  if (tier >= 11) return L"DXR 1.1 disponível: oclusão ambiente com raios sobre a geometria da cena (RayQuery).";
   if (tier == 10) return L"(Indisponível nesta GPU - requer RTX / RX 6000+)  Só DXR 1.0, sem RayQuery.";
   return L"(Indisponível nesta GPU - requer RTX / RX 6000+)";
 }
@@ -244,11 +244,11 @@ void build_advanced(HWND h) {
   label(h, L"", x + 340, y + 2, 140, 22, nullptr, kVibranceText);
   slider(h, kVibrance, x + 480, y - 2, 300, 0, 100, 0);
   y += 40;
-  check(h, L"Ray Tracing DXR 1.1 (sombras de contacto e AO)", kDxr, x, y, 400, false);
+  check(h, L"Ray Tracing DXR 1.1 (oclusão ambiente com raios)", kDxr, x, y, 400, false);
   y += 28;
   label(h, dxr_text(), x + 20, y, 760, 22, nullptr, kDxrNote);
   y += 34;
-  check(h, L"Resolves zero-copy (não copiar o que é reescrito antes de ser lido)", kZeroCopy, x, y, 700, false);
+  check(h, L"Resolves zero-copy (alias do render target + copy-on-write; mais lento neste jogo)", kZeroCopy, x, y, 700, false);
 }
 
 // Valores atuais da config nos controlos das abas Vídeo e Avançado (ao abrir e depois de um preset).
@@ -283,9 +283,9 @@ void sync_controls(HWND h) {
   effect(kTonemap, c.tonemap, kVibrance, kVibranceText, c.vibrance, L"Vibrância: %.0f%%");
   CheckDlgButton(h, kHalfRes, c.ss_half_res ? BST_CHECKED : BST_UNCHECKED);
   CheckDlgButton(h, kFp16, c.fp16_targets ? BST_CHECKED : BST_UNCHECKED);
-  // Só deteção: sem geometria em espaço do mundo não há estruturas de aceleração (README), por isso a caixa nunca liga nada.
-  CheckDlgButton(h, kDxr, BST_UNCHECKED);
-  EnableWindow(GetDlgItem(h, kDxr), FALSE);
+  const bool rt = gpu::render::raytracing_tier() >= 11;
+  CheckDlgButton(h, kDxr, c.raytracing && rt ? BST_CHECKED : BST_UNCHECKED);
+  EnableWindow(GetDlgItem(h, kDxr), rt);
   CheckDlgButton(h, kZeroCopy, c.zero_copy ? BST_CHECKED : BST_UNCHECKED);
 }
 

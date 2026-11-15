@@ -21,16 +21,22 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 - **Recompilação estática:** 2,4 milhões de instruções PowerPC (VMX/VMX128 incluído) traduzidas para C++.
 - **Direct3D 12:** resolução interna de 0,5× (360p) a 3× (4K) e FSR 1.0 (EASU + RCAS) para ampliar as escalas abaixo de 1×.
 - **Presets gráficos** (aba Vídeo do launcher e do F8): PC Fraco (540p + FSR, 30 FPS), Original Xbox 360 (720p, 30 FPS),
-  PC Moderno (1080p, 60 FPS, AF 8×, GTAO) e Ultra Next-Gen (1440p, AF 16×, GTAO + SSRTGI + SSR).
+  PC Moderno (1080p, 60 FPS, AF 8×, GTAO) e Ultra Next-Gen (1440p, AF 16×, GTAO + SSRTGI + SSR + AO com raios se houver DXR 1.1).
 - **Gráficos avançados** (aba "Avançado & RT"): filtro anisotrópico 2–16× só nas texturas 2D com mips e filtro linear;
   GTAO, luz indireta de 1 rebote (SSRTGI) e reflexos (SSR) em espaço de ecrã sobre a cena HDR, antes do pós-processamento e
   do HUD, a meia ou inteira resolução; render targets FP16 sem o limite 7e3 do Xenos; curva fílmica e vibrância. Os efeitos
   de ecrã são aproximações: o jogo não expõe normais nem a matriz de projeção (FOV de 70° assumido).
-- **Resolves zero-copy** (`ZeroCopyResolves`): a cópia de um resolve só se faz quando o destino é lido ou a fonte vai ser
-  reescrita; se o destino for resolvido outra vez antes disso, não se faz. No corredor do 1.º nível não evita nenhuma cópia
-  (as 4 por frame que nunca são lidas têm a fonte reescrita antes), por isso o ganho medido aí é nulo.
-- **Ray tracing (DXR 1.1):** só deteção e indicador no menu. Os vertex shaders do jogo são microcódigo traduzido e as matrizes
-  não estão em constantes fixas, por isso não há geometria em espaço do mundo para construir as estruturas de aceleração.
+- **Ray tracing (DXR 1.1, RayQuery):** oclusão ambiente com raios sobre a geometria real da cena. Os vertex shaders traduzidos
+  escrevem a posição de cada vértice dos desenhos opacos num buffer (UAV); como para a projeção do jogo w é a profundidade de vista,
+  (x, y, w) de recorte é o espaço da câmara com x e y escalados, e a BLAS é construída aí a cada frame, sem precisar das matrizes.
+  O raio primário de cada píxel encontra a superfície; os raios de AO veem também geometria escondida. Só com DXR 1.1 (a caixa fica
+  desativada e mostra "Indisponível" nas outras GPUs). No corredor do 1.º nível (≈0,9 M triângulos): BLAS 5,4 ms e raios 1,2 ms
+  de GPU por frame a meia resolução (RX 9060 XT), 44–47 FPS contra 46–50 sem ele. O stream-out do D3D12 foi tentado primeiro e
+  pendurava a GPU no driver da AMD (3 em 5 corridas).
+- **Resolves zero-copy** (`ZeroCopyResolves`, desligado por omissão): a textura de um resolve passa a ser o próprio render
+  target; quando o jogo o vai escrever, uma limpeza total troca-lhe o recurso (ping-pong, sem cópia) e qualquer outra escrita
+  faz a cópia. No corredor só 1 das 9 texturas elegíveis por frame acaba numa limpeza total (16 cópias por frame em vez de 17), e
+  invalidar as caches de descritores custa mais do que poupa (44–50 contra ~55 FPS). Fica como opção.
 - **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real. Com "FPS adaptativo"
   (`AdaptiveFps=1`, por omissão), uma cena que não aguenta 60 fica a 30 estáveis em vez de oscilar.
 - **Cache de PSOs:** os pipelines compilados pelo driver ficam em `user_data/shader_cache/pipelines.bin` e a lista dos usados em
@@ -190,16 +196,22 @@ It is not an emulator and does not use the original source code.
 - **Static recompilation:** 2.4 million PowerPC instructions (including VMX/VMX128) translated to C++.
 - **Direct3D 12:** internal resolution from 0.5× (360p) to 3× (4K) and FSR 1.0 (EASU + RCAS) to upscale the scales below 1×.
 - **Graphics presets** (Video tab of the launcher and F8): Low-Spec PC (540p + FSR, 30 FPS), Original Xbox 360 (720p, 30 FPS),
-  Modern PC (1080p, 60 FPS, 8× AF, GTAO) and Ultra Next-Gen (1440p, 16× AF, GTAO + SSRTGI + SSR).
+  Modern PC (1080p, 60 FPS, 8× AF, GTAO) and Ultra Next-Gen (1440p, 16× AF, GTAO + SSRTGI + SSR + ray-traced AO with DXR 1.1).
 - **Advanced graphics** ("Advanced & RT" tab): 2–16× anisotropic filtering only on 2D textures with mips and linear filtering;
   screen-space GTAO, one-bounce indirect light (SSRTGI) and reflections (SSR) on the HDR scene, before post-processing and the
   HUD, at half or full resolution; FP16 render targets without the Xenos 7e3 limit; filmic curve and vibrance. The screen-space
   effects are approximations: the game exposes neither normals nor the projection matrix (a 70° FOV is assumed).
-- **Zero-copy resolves** (`ZeroCopyResolves`): a resolve copy is only made when its destination is read or its source is about
-  to be overwritten; if the destination is resolved again first, it is skipped. In the first level's corridor it avoids no copy
-  (the 4 per frame that are never read have their source overwritten first), so the measured gain there is nil.
-- **Ray tracing (DXR 1.1):** detection and a menu indicator only. The game's vertex shaders are translated microcode and the
-  matrices are not in fixed constants, so there is no world-space geometry to build acceleration structures from.
+- **Ray tracing (DXR 1.1, RayQuery):** ray-traced ambient occlusion on the scene's real geometry. The translated vertex shaders
+  write each vertex position of the opaque draws to a buffer (UAV); since the game's projection has w equal to view depth, clip
+  (x, y, w) is camera space with scaled x and y, and the BLAS is built there every frame without needing the matrices. Each pixel's
+  primary ray finds the surface; the AO rays also see hidden geometry. DXR 1.1 only (the checkbox is disabled and shows
+  "unavailable" on other GPUs). In the first level's corridor (≈0.9 M triangles): 5.4 ms BLAS and 1.2 ms rays of GPU time per frame
+  at half resolution (RX 9060 XT), 44–47 FPS against 46–50 without it. D3D12 stream output was tried first and hung the GPU on the
+  AMD driver (3 runs out of 5).
+- **Zero-copy resolves** (`ZeroCopyResolves`, off by default): a resolve's texture becomes the render target itself; when the game
+  is about to write it, a full clear swaps its resource (ping-pong, no copy) and any other write makes the copy. In the corridor
+  only 1 of the 9 eligible textures per frame ends in a full clear (16 copies per frame instead of 17), and invalidating the
+  descriptor caches costs more than it saves (44–50 against ~55 FPS). It stays as an option.
 - **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time. With "adaptive FPS"
   (`AdaptiveFps=1`, the default), a scene that cannot hold 60 stays at a steady 30 instead of oscillating.
 - **PSO cache:** pipelines compiled by the driver are kept in `user_data/shader_cache/pipelines.bin` and the list of used ones in
