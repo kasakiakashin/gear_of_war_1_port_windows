@@ -30,13 +30,16 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
   escrevem a posição de cada vértice dos desenhos opacos num buffer (UAV); como para a projeção do jogo w é a profundidade de vista,
   (x, y, w) de recorte é o espaço da câmara com x e y escalados, e a BLAS é construída aí a cada frame, sem precisar das matrizes.
   O raio primário de cada píxel encontra a superfície; os raios de AO veem também geometria escondida. Só com DXR 1.1 (a caixa fica
-  desativada e mostra "Indisponível" nas outras GPUs). No corredor do 1.º nível (≈0,9 M triângulos): BLAS 5,4 ms e raios 1,2 ms
-  de GPU por frame a meia resolução (RX 9060 XT), 44–47 FPS contra 46–50 sem ele. O stream-out do D3D12 foi tentado primeiro e
-  pendurava a GPU no driver da AMD (3 em 5 corridas).
+  desativada e mostra "Indisponível" nas outras GPUs). A BLAS é atualizada por refit quando a geometria tem o mesmo número de
+  vértices (reconstruída de 8 em 8 frames) e o resultado passa por um denoiser bilateral separável guiado pela profundidade. No
+  corredor do 1.º nível (≈0,9 M triângulos, RX 9060 XT): BLAS+TLAS 1,5 ms e raios 1,3 ms de GPU por frame a meia resolução,
+  50–55 FPS contra 53–54 sem ele. O stream-out do D3D12 foi tentado primeiro e pendurava a GPU no driver da AMD.
+  Não há sombras de contacto com raios: o jogo não expõe a direção das luzes.
 - **Resolves zero-copy** (`ZeroCopyResolves`, desligado por omissão): a textura de um resolve passa a ser o próprio render
   target; quando o jogo o vai escrever, uma limpeza total troca-lhe o recurso (ping-pong, sem cópia) e qualquer outra escrita
-  faz a cópia. No corredor só 1 das 9 texturas elegíveis por frame acaba numa limpeza total (16 cópias por frame em vez de 17), e
-  invalidar as caches de descritores custa mais do que poupa (44–50 contra ~55 FPS). Fica como opção.
+  faz a cópia. No corredor só 1 das 9 texturas elegíveis por frame acaba numa limpeza total (16 cópias por frame em vez de 17);
+  desde a v1.0.2 as tabelas de descritores são validadas por slot em vez de esvaziadas, e o FPS fica igual (51–54 contra 53–54).
+  Sem ganho líquido, fica como opção.
 - **Taxa de quadros:** 30 (como no Xbox 360), 60, 120 FPS ou Ilimitado, com o tempo do jogo real. Com "FPS adaptativo"
   (`AdaptiveFps=1`, por omissão), uma cena que não aguenta 60 fica a 30 estáveis em vez de oscilar.
 - **Cache de PSOs:** os pipelines compilados pelo driver ficam em `user_data/shader_cache/pipelines.bin` e a lista dos usados em
@@ -205,13 +208,16 @@ It is not an emulator and does not use the original source code.
   write each vertex position of the opaque draws to a buffer (UAV); since the game's projection has w equal to view depth, clip
   (x, y, w) is camera space with scaled x and y, and the BLAS is built there every frame without needing the matrices. Each pixel's
   primary ray finds the surface; the AO rays also see hidden geometry. DXR 1.1 only (the checkbox is disabled and shows
-  "unavailable" on other GPUs). In the first level's corridor (≈0.9 M triangles): 5.4 ms BLAS and 1.2 ms rays of GPU time per frame
-  at half resolution (RX 9060 XT), 44–47 FPS against 46–50 without it. D3D12 stream output was tried first and hung the GPU on the
-  AMD driver (3 runs out of 5).
+  "unavailable" on other GPUs). The BLAS is refitted when the geometry has the same vertex count (rebuilt every 8 frames) and the
+  result goes through a depth-guided separable bilateral denoiser. In the first level's corridor (≈0.9 M triangles, RX 9060 XT):
+  1.5 ms BLAS+TLAS and 1.3 ms rays of GPU time per frame at half resolution, 50–55 FPS against 53–54 without it. D3D12 stream
+  output was tried first and hung the GPU on the AMD driver. There are no ray-traced contact shadows: the game does not expose the
+  light directions.
 - **Zero-copy resolves** (`ZeroCopyResolves`, off by default): a resolve's texture becomes the render target itself; when the game
   is about to write it, a full clear swaps its resource (ping-pong, no copy) and any other write makes the copy. In the corridor
-  only 1 of the 9 eligible textures per frame ends in a full clear (16 copies per frame instead of 17), and invalidating the
-  descriptor caches costs more than it saves (44–50 against ~55 FPS). It stays as an option.
+  only 1 of the 9 eligible textures per frame ends in a full clear (16 copies per frame instead of 17); since v1.0.2 descriptor
+  tables are validated per slot instead of being flushed, and the FPS is the same (51–54 against 53–54). With no net gain, it
+  stays as an option.
 - **Frame rate:** 30 (as on Xbox 360), 60, 120 FPS or Unlimited, with real game time. With "adaptive FPS"
   (`AdaptiveFps=1`, the default), a scene that cannot hold 60 stays at a steady 30 instead of oscillating.
 - **PSO cache:** pipelines compiled by the driver are kept in `user_data/shader_cache/pipelines.bin` and the list of used ones in

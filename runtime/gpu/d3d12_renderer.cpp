@@ -276,6 +276,7 @@ struct Renderer {
     uint64_t time;
     uint32_t srv_base, smp_base;
     Texture* tex[32];
+    ID3D12Resource* res[32];  // recurso de cada slot quando a tabela foi feita (o zero-copy troca-o no copy-on-write)
     float size[32][4];
   };
   FlatMap<DescCache> desc_cache;  // por PS (endereço do Compiled)
@@ -1407,7 +1408,6 @@ void copy_on_write(Texture& rt) {
     if (a->alias == &rt) mine.push_back(a);
   const bool full = g_clear_target == &rt && g_clear_rect.left <= 0 && g_clear_rect.top <= 0 &&
                     g_clear_rect.right >= (LONG)rt.width && g_clear_rect.bottom >= (LONG)rt.height;
-  g.desc_cache.clear();  // tabelas de descritores com o recurso antigo
   if (!full || mine.empty()) {
     for (Texture* a : mine) materialize(*a);
     return;
@@ -1610,6 +1610,24 @@ float4 effects(float4 pos : SV_Position) : SV_Target {
   }
   return float4(add, ao);
 }
+// Denoiser: filtro bilateral separável (c3.xy = direção) sobre o buffer dos efeitos, guiado pela profundidade linear. Dois
+// passes (horizontal e vertical) de 9 amostras alargam o 3×3 da composição para 9×9 sem custo quadrático.
+float4 blur(float4 pos : SV_Position) : SV_Target {
+  uint fw, fh;
+  fxb.GetDimensions(fw, fh);
+  int2 q = int2(pos.xy);
+  float zc = zlin(depth_at((q + 0.5) * c2.z - 0.5));
+  float4 acc = 0;
+  float wsum = 0;
+  [unroll] for (int i = -4; i <= 4; i++) {
+    int2 t = clamp(q + int2(c3.xy) * i, int2(0, 0), int2(fw - 1, fh - 1));
+    float zt = zlin(depth_at((t + 0.5) * c2.z - 0.5));
+    float w = exp(-i * i / 8.0) / (0.02 + abs(zt - zc) / max(zc, 1e-3));
+    acc += fxb.Load(int3(t, 0)) * w;
+    wsum += w;
+  }
+  return acc / max(wsum, 1e-5);
+}
 float4 composite(float4 pos : SV_Position) : SV_Target {
   float2 p = pos.xy - c0.xy - 0.5;  // píxel na região
   float4 C = col.Load(int3(int2(p), 0));
@@ -1657,6 +1675,9 @@ struct RtState {
   bool capturing = false;      // SO ligado neste frame (até ao hook dos efeitos)
   bool frame_done = false;     // o hook deste frame já passou: não há mais captura
   bool built = false;          // BLAS/TLAS deste frame prontos
+  uint32_t last_n = 0;         // vértices da última construção (refit só com o mesmo número)
+  uint32_t since_build = 1000;  // frames desde a última construção completa
+  uint32_t stat_refits = 0;
   uint32_t stat_draws = 0, stat_verts = 0, stat_builds = 0;
   // Tempo de GPU: 4 timestamps por frame (antes/depois da BLAS+TLAS, antes/depois do passe RayQuery), lidos 2 frames depois.
   ID3D12QueryHeap* qh = nullptr;
@@ -1692,8 +1713,9 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS rt_blas_inputs(D3D12_RAYTRA
   D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
   in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
   static const bool fast_trace = std::getenv("GOW_RT_FAST_TRACE") != nullptr;
-  in.Flags = fast_trace ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
-                        : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+  in.Flags = (fast_trace ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
+                         : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD) |
+             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
   in.NumDescs = 1;
   in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
   in.pGeometryDescs = &geo;
@@ -1794,7 +1816,8 @@ bool rt_init() {
   g_rt.so = rt_buffer(12ull * RtState::kMaxVerts, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, true);
   g_rt.blas = rt_buffer(bi.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, as, true);
   g_rt.tlas = rt_buffer(ti.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, as, true);
-  g_rt.scratch = rt_buffer(std::max(bi.ScratchDataSizeInBytes, ti.ScratchDataSizeInBytes), D3D12_HEAP_TYPE_DEFAULT,
+  g_rt.scratch = rt_buffer(std::max({bi.ScratchDataSizeInBytes, bi.UpdateScratchDataSizeInBytes, ti.ScratchDataSizeInBytes}),
+                           D3D12_HEAP_TYPE_DEFAULT,
                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
   g_rt.instances = rt_buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false);
   if (!g_rt.so || !g_rt.blas || !g_rt.tlas || !g_rt.scratch || !g_rt.instances) {
@@ -1880,6 +1903,20 @@ bool rt_build() {
   D3D12_RAYTRACING_GEOMETRY_DESC geo;
   D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
   bd.Inputs = rt_blas_inputs(geo, n);
+  // Refit (só atualiza as caixas, muito mais barato) quando o frame tem os mesmos vértices que o anterior: em jogo a ordem dos
+  // desenhos quase não muda. A topologia antiga com posições novas continua correta; só a BVH piora, por isso de 8 em 8 frames
+  // (GOW_RT_REBUILD) ou quando o número muda há uma construção completa.
+  static const uint32_t rebuild = std::getenv("GOW_RT_REBUILD") ? (uint32_t)std::atoi(std::getenv("GOW_RT_REBUILD")) : 8;
+  const bool refit = n == g_rt.last_n && g_rt.since_build < rebuild;
+  if (refit) {
+    bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+    bd.SourceAccelerationStructureData = g_rt.blas->GetGPUVirtualAddress();
+    g_rt.since_build++;
+    g_rt.stat_refits++;
+  } else {
+    g_rt.since_build = 1;
+    g_rt.last_n = n;
+  }
   bd.DestAccelerationStructureData = g_rt.blas->GetGPUVirtualAddress();
   bd.ScratchAccelerationStructureData = g_rt.scratch->GetGPUVirtualAddress();
   g_rt.list4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
@@ -1914,8 +1951,8 @@ void rt_end_frame() {
 struct FxState {
   bool tried = false, ok = false;
   ID3D12RootSignature* root = nullptr;
-  ID3D12PipelineState* pso[2] = {};  // efeitos, composição
-  Texture color, buf;
+  ID3D12PipelineState* pso[3] = {};  // efeitos, composição, denoiser
+  Texture color, buf, buf2;
   bool after_depth = false;  // houve um resolve de profundidade de ecrã inteiro neste frame (ou tile) desde a última aplicação
 };
 FxState g_fx;
@@ -1939,8 +1976,8 @@ bool fx_init() {
     return false;
   }
   blob->Release();
-  const char* entry[2] = {"effects", "composite"};
-  for (int i = 0; i < 2; i++) {
+  const char* entry[3] = {"effects", "composite", "blur"};
+  for (int i = 0; i < 3; i++) {
     std::string e;
     ID3DBlob* ps = compile_hlsl(std::string("#define ") + entry[i] + " main\n" + kFxHlsl, "ps_5_0", entry[i], &e);
     if (!ps) {
@@ -2004,10 +2041,11 @@ void fx_apply(Texture& scene, Texture& depth, float sx, float sy, float w, float
     if (g_fx.color.res) g.garbage.push_back(g_fx.color.res), g_fx.color.res = nullptr;
     if (!create_texture(g_fx.color, rw, rh, DXGI_FORMAT_R16G16B16A16_FLOAT, true, false)) return;
   }
-  if (!g_fx.buf.res || g_fx.buf.width != bw || g_fx.buf.height != bh) {
-    if (g_fx.buf.res) g.garbage.push_back(g_fx.buf.res), g_fx.buf.res = nullptr;
-    if (!create_texture(g_fx.buf, bw, bh, DXGI_FORMAT_R16G16B16A16_FLOAT, true, false)) return;
-  }
+  for (Texture* b : {&g_fx.buf, &g_fx.buf2})
+    if (!b->res || b->width != bw || b->height != bh) {
+      if (b->res) g.garbage.push_back(b->res), b->res = nullptr;
+      if (!create_texture(*b, bw, bh, DXGI_FORMAT_R16G16B16A16_FLOAT, true, false)) return;
+    }
   const float ox = std::round(sx * S), oy = std::round(sy * S);
   blit(scene, g_fx.color.res, g_fx.color.state, g_fx.color.rtv, DXGI_FORMAT_R16G16B16A16_FLOAT, ox, oy, (float)rw, (float)rh, 0, 0,
        (float)rw, (float)rh, false, kColor, false);
@@ -2044,6 +2082,20 @@ void fx_apply(Texture& scene, Texture& depth, float sx, float sy, float w, float
     g_rt_passes++;
   }
   transition(g_fx.buf, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  static const bool no_denoise = std::getenv("GOW_FX_NO_DENOISE") != nullptr;
+  if (!no_denoise) {  // horizontal buf -> buf2, vertical buf2 -> buf
+    float bc[16];
+    std::memcpy(bc, c, sizeof bc);
+    bc[12] = 1, bc[13] = 0;
+    transition(g_fx.buf2, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    invalidate_bound();
+    fx_pass(2, 0, 0, (float)bw, (float)bh, g_fx.buf2.rtv, g_fx.color, depth, g_fx.buf, bc);
+    transition(g_fx.buf2, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transition(g_fx.buf, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    bc[12] = 0, bc[13] = 1;
+    fx_pass(2, 0, 0, (float)bw, (float)bh, g_fx.buf.rtv, g_fx.color, depth, g_fx.buf2, bc);
+    transition(g_fx.buf, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  }
   transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET);
   fx_pass(1, ox, oy, (float)rw, (float)rh, scene.rtv, g_fx.color, depth, g_fx.buf, c);
   invalidate_bound();
@@ -3629,7 +3681,12 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
       const uint64_t* gen = constant_generations();
       uint64_t newest = 0;
       for (uint32_t m = used_tex; m; m &= m - 1) newest = std::max(newest, gen[kConstGenFetchSlot + __builtin_ctz(m)]);
-      if (newest <= dcp->time) {
+      bool same_res = true;  // um alias que fez copy-on-write mudou o recurso deste slot: só esta entrada deixa de valer
+      for (uint32_t m = used_tex; m && same_res; m &= m - 1) {
+        const uint32_t k = __builtin_ctz(m);
+        same_res = dcp->tex[k]->res == dcp->res[k];
+      }
+      if (newest <= dcp->time && same_res) {
         const Renderer::DescCache& dc = *dcp;
         desc_hit = true;
         srv_base = dc.srv_base, smp_base = dc.smp_base;
@@ -3733,6 +3790,7 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     for (uint32_t m = used_tex; m; m &= m - 1) {
       const uint32_t k = __builtin_ctz(m);
       dc.tex[k] = slot_tex[k];
+      dc.res[k] = slot_tex[k]->res;
       std::memcpy(dc.size[k], sys.tex_size[k], sizeof dc.size[k]);
     }
   }
@@ -3826,7 +3884,8 @@ void draw(uint32_t initiator, uint32_t dma_base, uint32_t dma_size, const uint32
     std::memcpy(bl + 8, cr + (kConstLoop - 0x4000), 32 * 4);
     cb_bools = upload_regs_cached(g.cc_bools, kConstGenBool, bl, sizeof bl);
   }
-  if (rt_capture && host_count % 3 == 0 && g_rt.verts + host_count <= RtState::kMaxVerts) {
+  static const uint32_t rt_min_tris = std::getenv("GOW_RT_MIN_TRIS") ? (uint32_t)std::atoi(std::getenv("GOW_RT_MIN_TRIS")) : 16;
+  if (rt_capture && host_count % 3 == 0 && host_count >= 3 * rt_min_tris && g_rt.verts + host_count <= RtState::kMaxVerts) {
     if (!g_rt.capturing) rt_begin_capture();
     sys.capture[0] = 1, sys.capture[1] = g_rt.verts;
   } else {
@@ -4196,12 +4255,13 @@ void swap(uint32_t frontbuffer, uint32_t width, uint32_t height, const uint32_t 
     g_aniso_samplers = g_rs_read = g_rs_unread = g_fx_passes = g_zc_saved = g_zc_done = 0;
     g_zc_alias = g_zc_swap = g_zc_mat = g_resolve_copies = 0;
     if (g_rt.ok)
-      std::fprintf(stderr, "[rt] em 120 frames: %u desenhos capturados, %.0f mil triângulos por frame, %u BLAS, %u passes RayQuery; "
-                           "GPU: BLAS+TLAS %.2f ms, raios %.2f ms por frame\n",
+      std::fprintf(stderr, "[rt] em 120 frames: %u desenhos capturados, %.0f mil triângulos por frame, %u BLAS (%u por refit), %u passes "
+                           "RayQuery; GPU: BLAS+TLAS %.2f ms, raios %.2f ms por frame\n",
                    g_rt.stat_draws, g_rt.stat_builds ? g_rt.stat_verts / 3.0 / g_rt.stat_builds / 1000.0 : 0.0, g_rt.stat_builds,
+                   g_rt.stat_refits,
                    g_rt_passes, g_rt.timed ? g_rt.build_ms / g_rt.timed : 0.0, g_rt.timed ? g_rt.pass_ms / g_rt.timed : 0.0);
     g_rt.build_ms = g_rt.pass_ms = 0, g_rt.timed = 0;
-    g_rt.stat_draws = g_rt.stat_verts = g_rt.stat_builds = g_rt_passes = 0;
+    g_rt.stat_draws = g_rt.stat_verts = g_rt.stat_builds = g_rt_passes = g_rt.stat_refits = 0;
     g.stat_worst_ms = 0;
     g.stat_slow_frames = 0;
     g.stat_submits = g.stat_creates = 0;
