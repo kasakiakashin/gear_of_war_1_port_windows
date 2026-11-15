@@ -48,6 +48,9 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
   aqui as superfícies têm a altura inteira e cada objeto é desenhado uma só vez. Com isto e um processador de comandos mais
   leve, o corredor mais pesado do 1.º nível (≈6600 desenhos por frame) passou de ~38 a 60 FPS. `GOW_EXACT_TILES=1` volta ao
   modo do hardware.
+- **Critical sections com spin:** como o spin count de uma critical section real, o `RtlEnterCriticalSection` tenta o lock
+  durante uns microssegundos antes de bloquear. O alocador do UE3 é partilhado pela game thread e pela de render, e bloquear
+  logo custava-lhes 16–26% do tempo: Alamo (capítulo 69, ~2900 desenhos por frame) passou de 36–41 a 56–59 FPS.
 - **Tradutor de shaders Xenos:** microcódigo da GPU do Xbox 360 convertido em HLSL, com cache em disco.
 - **Launcher com pré-compilação:** antes do jogo, procura os 17 mil shaders nos pacotes do disco (com descompressão LZO) e
   compila-os com todos os núcleos, com barra de progresso; o pacote traz-os já compilados (`prebuilt_shaders.bin`).
@@ -65,7 +68,7 @@ para C++ por recompilação estática, e o kernel do Xbox 360, a GPU Xenos e o �
 |---|---|
 | Arranque, menus, gravação e Continuar | A funcionar |
 | 1.º nível da campanha (prisão) | Jogável, com comando ou teclado e rato; a 30 fps na máquina de desenvolvimento |
-| Resto da campanha | **Por testar** |
+| Resto da campanha | Os 33 capítulos (`WarGame_P?LoadChapter=37..69`, o caminho do seletor de capítulos) carregam e desenham o nível: 0 crashes e 0 erros de GPU em 90 s cada, incluindo a passagem automática Station → Tyro. **Por testar:** a campanha jogada de ponta a ponta |
 | Co-op e Versus (túnel P2P) | Testados entre duas instâncias no mesmo PC; **por testar pela internet** |
 | MSAA e EDRAM fiéis | Por fazer (MSAA ignorado) |
 | Áudio | Depende das DLLs do FFmpeg; sem elas o XMA fica em silêncio |
@@ -226,6 +229,9 @@ It is not an emulator and does not use the original source code.
   here the surfaces have the full height and each object is drawn once. With this and a lighter command processor, the
   heaviest corridor of the first level (≈6,600 draws per frame) went from ~38 to 60 FPS. `GOW_EXACT_TILES=1` restores the
   hardware behaviour.
+- **Spinning critical sections:** like the spin count of a real critical section, `RtlEnterCriticalSection` tries the lock for
+  a few microseconds before blocking. The UE3 allocator is shared by the game and render threads, and blocking straight away
+  cost them 16–26% of their time: Alamo (chapter 69, ~2,900 draws per frame) went from 36–41 to 56–59 FPS.
 - **Xenos shader translator:** Xbox 360 GPU microcode converted to HLSL, with a disk cache.
 - **Launcher with shader precompilation:** before the game starts, it finds the 17,000 shaders in the disc packages
   (LZO-decompressing them) and compiles them on every core, with a progress bar; the package ships them precompiled
@@ -244,7 +250,7 @@ It is not an emulator and does not use the original source code.
 |---|---|
 | Boot, menus, saving and Continue | Working |
 | First campaign level (prison) | Playable with a gamepad or keyboard and mouse; 30 fps on the development machine |
-| Rest of the campaign | **Untested** |
+| Rest of the campaign | All 33 chapters (`WarGame_P?LoadChapter=37..69`, the chapter-select path) load and render the level: 0 crashes and 0 GPU errors in 90 s each, including the automatic Station → Tyro transition. **Untested:** the campaign played start to finish |
 | Co-op and Versus (P2P tunnel) | Tested between two instances on one PC; **untested over the internet** |
 | Accurate MSAA and EDRAM | Not done (MSAA is ignored) |
 | Audio | Needs the FFmpeg DLLs; without them XMA is silent |

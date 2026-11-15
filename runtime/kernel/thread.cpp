@@ -180,6 +180,13 @@ void print_samples() {
     for (size_t i = 0; i < v.size() && i < 10; i++)
       std::fprintf(stderr, "[sample]   %5.1f%%  %s\n", 100.0 * v[i].first / total, v[i].second.c_str());
   }
+  // GOW_SAMPLE_DUMP=ficheiro: todas as pilhas ("thread amostras lr <- ..."), para somar o custo inclusivo por função fora do jogo.
+  if (const char* path = std::getenv("GOW_SAMPLE_DUMP"))
+    if (FILE* f = std::fopen(path, "w")) {
+      for (auto& [id, stacks] : g_samples)
+        for (auto& [k, n] : stacks) std::fprintf(f, "%u %llu %s\n", id, (unsigned long long)n, k.c_str());
+      std::fclose(f);
+    }
 }
 
 void wait_while_suspended(GuestThread* t) {

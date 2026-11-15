@@ -1,4 +1,6 @@
 // rtl.cpp — critical sections do RTL e listas SLIST interligadas.
+#include <immintrin.h>
+
 #include <atomic>
 #include <thread>
 
@@ -39,8 +41,27 @@ XBOX_IMPORT(RtlInitializeCriticalSectionAndSpinCount) {
 }
 XBOX_IMPORT(RtlDeleteCriticalSection) {}
 
+// Com contenção, bloquear logo custa uma ida e volta ao escalonador (o dispatcher acorda as threads por uma variável de condição
+// global), e o lock do alocador do UE3 (FMallocThreadSafeProxy, partilhado pela game thread e pela de render) só fica ocupado
+// durante um malloc: em Alamo 16–26% do tempo dessas threads era esta espera. Como o spin count do CRITICAL_SECTION real, tenta-se
+// primeiro a transição livre (-1 → 0) durante uns microssegundos, sem se registar como espera no LockCount.
 XBOX_IMPORT(RtlEnterCriticalSection) {
   uint32_t cs = arg(ctx, 0), cur = me();
+  if (atomic_cas32(mem_base, cs + kLockCount, 0xFFFFFFFFu, 0)) {
+    ppc_st32(mem_base, cs + kOwner, cur);
+    ppc_st32(mem_base, cs + kRecursion, 1);
+    return;
+  }
+  if (ppc_ld32(mem_base, cs + kOwner) != cur) {
+    for (int i = 0; i < 2048; i++) {
+      _mm_pause();
+      if (ppc_ld32(mem_base, cs + kLockCount) == 0xFFFFFFFFu && atomic_cas32(mem_base, cs + kLockCount, 0xFFFFFFFFu, 0)) {
+        ppc_st32(mem_base, cs + kOwner, cur);
+        ppc_st32(mem_base, cs + kRecursion, 1);
+        return;
+      }
+    }
+  }
   if (atomic_add32(mem_base, cs + kLockCount, 1) == 0) {  // estava livre (-1)
     ppc_st32(mem_base, cs + kOwner, cur);
     ppc_st32(mem_base, cs + kRecursion, 1);
