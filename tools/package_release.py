@@ -22,7 +22,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = "GearsOfWar1-PC-Port"
-DEFAULT_VERSION = "0.9.1"
+DEFAULT_VERSION = "1.0.0"
 # As mesmas de GOW_FFMPEG_DLLS em runtime/CMakeLists.txt: só as dependências reais do avcodec.
 FFMPEG_DLLS = ["avcodec-60.dll", "avutil-58.dll", "libwinpthread-1.dll", "zlib1.dll", "VCRUNTIME140.dll"]
 SHADER_PACK = "prebuilt_shaders.bin"  # exceções ao .bin de FORBIDDEN
@@ -63,13 +63,22 @@ CONTROLOS
   Esc ou F10 = soltar o rato
 
 ATALHOS
-  F8         Menu: video, FPS, audio e idioma, controlos e Co-op pela internet
+  F8         Menu: video, graficos avancados, FPS, audio e idioma, controlos e Co-op pela internet
   F9         Copiar o codigo de ligacao do Co-op
   Alt+Enter  Ecra inteiro
 
+GRAFICOS
+  F8 (ou o launcher) > Video > Preset grafico:
+    PC Fraco           540p ampliado com FSR 1.0, 30 FPS
+    Original Xbox 360  720p, 30 FPS, sem extras
+    PC Moderno         1080p, 60 FPS, filtro anisotropico 8x, oclusao ambiente (GTAO)
+    Ultra Next-Gen     1440p, 60 FPS, anisotropico 16x, GTAO + luz indireta (SSRTGI) + reflexos (SSR)
+  Cada opcao pode ser mudada a parte em F8 > Avancado & RT. Os efeitos de ecra sao aproximacoes (o jogo nao
+  da normais nem a matriz da camara). O ray tracing (DXR) so e detetado: ainda nao ha efeitos com raios.
+
 CO-OP
-  Anfitriao: F8 > Multiplayer Co-op > "Gerar Sala Co-op" > "Copiar Convite", e envie-o ao amigo.
-  Convidado: F8 > Multiplayer Co-op, cole o convite na caixa > "Conectar ao Amigo".
+  Anfitriao: F8 > Multiplayer > "Gerar Sala Co-op" > "Copiar Convite", e envie-o ao amigo.
+  Convidado: F8 > Multiplayer, cole o convite na caixa > "Conectar ao Amigo".
   Depois, no menu do jogo: Campaign ou Versus > System Link > crie ou entre na sala da lista.
   Partilhar um convite revela o seu IP publico a quem o receber.
 
