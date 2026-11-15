@@ -78,16 +78,29 @@ Requisitos: Windows 10/11 de 64 bits, CPU com AVX2, placa gráfica com Direct3D 
 ### Jogar
 
 1. Compile o projeto (ver abaixo) ou use um pacote gerado por `tools/package_release.py`.
-2. Abra o `gow.exe`. No launcher, carregue em **Selecionar ISO** se a ISO não estiver na pasta, e depois em
-   **INICIAR JOGO**. **Não é preciso extrair nada:** os ficheiros são lidos da ISO em tempo real.
+2. Abra o `gow.exe`. No launcher, carregue em **Selecionar jogo** se a ISO não estiver na pasta (pode escolher a ISO ou
+   o `default.xex` de uma pasta do jogo), e depois em **INICIAR JOGO**. **Não é preciso extrair nada:** os ficheiros são
+   lidos da ISO em tempo real.
 
 O launcher tem as mesmas configurações do F8 (vídeo, áudio e idioma, controlos, Co-op: pode hospedar ou colar um convite
 antes de entrar). Os shaders vêm compilados em `prebuilt_shaders.bin` e são lidos diretamente dele; sem esse ficheiro, o
 launcher compila-os a partir do disco (cerca de 15 minutos num CPU de 12 threads, só uma vez). Se carregar em INICIAR JOGO antes do fim, a barra passa para o ecrã
 do jogo. `gow.exe --skip-launcher` salta o launcher; `gow.exe --prepare-shaders [--pack ficheiro]` só prepara os shaders.
 
-Só é aceite a versão para a qual o código foi traduzido. O `gow.exe` compara o SHA-1 da imagem do executável com
-`083d7d0ab2ae1ee6d9d536bc5ca987862ad8c8f7` e recusa outras versões.
+**Versões do executável:** há duas traduções, cada uma no seu `.exe`:
+
+| Executável | Versão do jogo | Cópias |
+|---|---|---|
+| `gow.exe` | 0.0.0.1 (disco) | ISO ou dump do disco |
+| `gow_tu5.exe` | 0.0.5.1 (title update 5) | Pastas com o `default.xex` da TU5, como as cópias para RGH |
+
+O launcher identifica a versão do jogo escolhido (SHA-1 da imagem do executável sem a tabela de hashes `HashSec`) e abre o
+executável certo sozinho. Outras versões são recusadas.
+
+**Traduções e mods:** uma pasta do jogo (`GameDir=` no `gow_config.ini`, ou `extracted/`) tem prioridade sobre a ISO. O
+jogo verifica alguns ficheiros (`Coalesced.*`, fontes, pacotes não comprimidos) contra a `HashSec` do executável e recusa
+os alterados ("dirty disc"): o port põe nessa tabela o SHA-1 dos ficheiros soltos, por isso uma tradução como a PT-BR para
+RGH funciona com qualquer um dos executáveis. Testado: legendas, menus e dicas de carregamento em português.
 
 | Tecla | Ação |
 |---|---|
@@ -260,16 +273,29 @@ Requirements: 64-bit Windows 10/11, a CPU with AVX2, a Direct3D 12 graphics card
 ### Playing
 
 1. Build the project (see below) or use a package made by `tools/package_release.py`.
-2. Open `gow.exe`. In the launcher, click **Selecionar ISO** if the ISO is not in the folder, then **INICIAR JOGO**.
-   **Nothing needs extracting:** files are read from the ISO in real time.
+2. Open `gow.exe`. In the launcher, click **Selecionar jogo** if the ISO is not in the folder (you can pick the ISO or
+   the `default.xex` of a game folder), then **INICIAR JOGO**. **Nothing needs extracting:** files are read from the ISO
+   in real time.
 
 The launcher has the same settings as F8 (video, audio and language, controls, co-op: you can host or paste an invite before
 starting). The shaders ship compiled in `prebuilt_shaders.bin` and are read straight from it; without that file, the
 launcher compiles them from the disc (about 15 minutes on a 12-thread CPU, once). If you click INICIAR JOGO before it finishes, the bar moves to the game screen.
 `gow.exe --skip-launcher` skips the launcher; `gow.exe --prepare-shaders [--pack file]` only prepares the shaders.
 
-Only the version the code was translated from is accepted. `gow.exe` compares the SHA-1 of the executable image with
-`083d7d0ab2ae1ee6d9d536bc5ca987862ad8c8f7` and refuses other versions.
+**Executable versions:** there are two translations, each in its own `.exe`:
+
+| Executable | Game version | Copies |
+|---|---|---|
+| `gow.exe` | 0.0.0.1 (disc) | ISO or disc dump |
+| `gow_tu5.exe` | 0.0.5.1 (title update 5) | Folders with the TU5 `default.xex`, such as RGH copies |
+
+The launcher identifies the version of the chosen game (SHA-1 of the executable image without the `HashSec` hash table)
+and opens the right executable by itself. Other versions are refused.
+
+**Translations and mods:** a game folder (`GameDir=` in `gow_config.ini`, or `extracted/`) takes priority over the ISO.
+The game checks some files (`Coalesced.*`, fonts, uncompressed packages) against the executable's `HashSec` and refuses
+modified ones ("dirty disc"): the port writes the loose files' SHA-1 into that table, so a translation such as the PT-BR
+one for RGH works with either executable. Tested: subtitles, menus and loading tips in Portuguese.
 
 | Key | Action |
 |---|---|

@@ -147,7 +147,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE: {
       g_wnd = h;
       add(h, L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, kIsoText, 24, 66, kWidth - 250, 24, g_bold);
-      add(h, L"BUTTON", L"Selecionar ISO", BS_OWNERDRAW | WS_TABSTOP, kIsoButton, kWidth - 200, 62, 176, 30, g_bold);
+      add(h, L"BUTTON", L"Selecionar jogo", BS_OWNERDRAW | WS_TABSTOP, kIsoButton, kWidth - 200, 62, 176, 30, g_bold);
       add(h, L"STATIC", L"", SS_NOPREFIX, kPrepText, 24, 118, kWidth - 250, 24, g_font);
       add(h, L"BUTTON", L"Preparar shaders", BS_OWNERDRAW | WS_TABSTOP, kPrepButton, kWidth - 200, 112, 176, 30, g_bold);
       add(h, L"BUTTON", L"INICIAR JOGO", BS_OWNERDRAW | WS_TABSTOP, kPlay, 24, 176, kWidth - 48, 30, g_play);

@@ -59,13 +59,29 @@ bool unmount(const std::string& device) {
   return g_mounts.erase(lower(device)) != 0;
 }
 
+namespace {
+std::mutex g_root_mu;
+std::filesystem::path g_root;
+bool g_hide_loose_xex = false;
+}  // namespace
+
 std::filesystem::path game_root() {
-  static const std::filesystem::path root = [] {
+  std::lock_guard<std::mutex> lock(g_root_mu);
+  if (g_root.empty()) {
     const char* e = std::getenv("GOW_GAME_DIR");
-    return std::filesystem::path(e && *e ? e : "extracted");
-  }();
-  return root;
+    g_root = e && *e ? e : "extracted";
+  }
+  return g_root;
 }
+
+void set_game_root(const std::filesystem::path& root) {
+  std::lock_guard<std::mutex> lock(g_root_mu);
+  g_root = root;
+}
+
+void hide_loose_xex(bool hide) { g_hide_loose_xex = hide; }
+
+bool loose_xex_hidden() { return g_hide_loose_xex; }
 
 std::optional<Resolved> resolve(const std::string& guest_path) {
   static const char* const kGameDevices[] = {"game:", "d:", "\\device\\cdrom0", "\\??\\game:", "\\??\\d:"};
@@ -77,7 +93,7 @@ std::optional<Resolved> resolve(const std::string& guest_path) {
     Resolved out{game_root() / rel, false};
     std::error_code ec;
     const auto st = std::filesystem::status(out.host, ec);
-    const bool loose = !ec && std::filesystem::exists(st);
+    const bool loose = !ec && std::filesystem::exists(st) && !(g_hide_loose_xex && lower(rel.generic_string()) == "default.xex");
     if (!loose || std::filesystem::is_directory(st)) out.iso = iso::find(rel.generic_string());
     if (!loose) out.iso_parent = iso::find(rel.parent_path().generic_string()) != nullptr;
     return out;
@@ -96,7 +112,8 @@ std::optional<Resolved> resolve(const std::string& guest_path) {
 }
 
 bool read_game_file(const std::string& rel, std::vector<uint8_t>* out, size_t max) {
-  if (std::ifstream in{game_root() / rel, std::ios::binary | std::ios::ate}) {
+  if (std::ifstream in{g_hide_loose_xex && lower(rel) == "default.xex" ? std::filesystem::path() : game_root() / rel,
+                       std::ios::binary | std::ios::ate}) {
     const size_t size = std::min<size_t>((size_t)in.tellg(), max);
     out->resize(size);
     in.seekg(0);

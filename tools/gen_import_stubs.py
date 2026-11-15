@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import sys
 
 IMPL = re.compile(r"^\s*XBOX_IMPORT\(\s*(\w+)\s*\)", re.M)
 STUBS = "imports_stubs.cpp"
@@ -35,11 +36,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", default="analysis/import_names.json")
     ap.add_argument("--runtime", default="runtime")
+    # Outra versão do executável (ex.: a title update 5): os nomes por ordinal são os mesmos, mas as entradas da IAT e os
+    # thunks mudam de sítio. --map binary_map.json dessa versão + --bindings ficheiro de saída (só esse é escrito).
+    ap.add_argument("--map", help="binary_map.json de outra versão: endereços de slot/thunk")
+    ap.add_argument("--bindings", default="import_bindings.inc")
     a = ap.parse_args()
     rows = json.load(open(a.json, encoding="utf-8"))["imports"]
     impl = implemented(a.runtime)
+    if a.map:
+        addr = {}
+        for lib in json.load(open(a.map, encoding="utf-8"))["imports"]:
+            for i in lib["imports"]:
+                addr[(lib["library_index"], i["ordinal"])] = i
+        missing = [r["name"] for r in rows if (r["lib_index"], r["ordinal"]) not in addr]
+        if missing or len(addr) != len(rows):
+            sys.exit(f"imports diferentes entre as versões: {missing[:5]} ({len(addr)} contra {len(rows)})")
+        rows = [dict(r, variable_address=addr[(r["lib_index"], r["ordinal"])]["variable_address"],
+                     thunk_address=addr[(r["lib_index"], r["ordinal"])]["thunk_address"]) for r in rows]
 
-    with open(os.path.join(a.runtime, "import_bindings.inc"), "w", encoding="utf-8", newline="\n") as fp:
+    with open(os.path.join(a.runtime, a.bindings), "w", encoding="utf-8", newline="\n") as fp:
         fp.write("// Gerado por tools/gen_import_stubs.py — {lib, ordinal, nome, variável, slot, thunk}\n")
         for r in rows:
             slot = int(r["variable_address"] or "0", 16)

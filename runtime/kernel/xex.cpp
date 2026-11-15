@@ -8,6 +8,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -15,6 +18,7 @@
 #include "guest_memory.h"
 #include "kernel/kernel.h"
 #include "kernel/vfs.h"
+#include "kernel/xex_image.h"
 
 using namespace kernel;
 
@@ -131,12 +135,47 @@ XBOX_IMPORT(XexGetModuleHandle) {
   ret_status(ctx, h ? kStatusSuccess : kStatusDllNotFound);
 }
 
+// HashSec: {caminho "..\WarGame\…" terminado em zero; hash de 20 bytes}*. O jogo recusa ("dirty disc") qualquer ficheiro
+// da tabela cujo conteúdo não bata (Coalesced.ini/.int, pacotes _LOC_, fontes). Um ficheiro solto da pasta do jogo que
+// substitui um da tabela é uma escolha do jogador (tradução, mod): a entrada passa a ter o SHA-1 desse ficheiro, como as
+// traduções para RGH fazem ao reescrever a HashSec do seu default.xex.
+static void patch_hash_section(uint8_t* m, uint32_t address, uint32_t size) {
+  uint32_t p = address;
+  const uint32_t end = address + size;
+  while (p < end) {
+    std::string path;
+    while (p < end && ppc_ld8(m, p)) path += (char)ppc_ld8(m, p++);
+    if (path.empty() || p + 21 > end) break;
+    const uint32_t hash = p + 1;
+    p = hash + 20;
+    std::string rel = path.compare(0, 3, "..\\") == 0 ? path.substr(3) : path;
+    const auto r = vfs::resolve("game:\\" + rel);
+    std::error_code ec;
+    if (!r || r->iso || !std::filesystem::is_regular_file(r->host, ec)) continue;  // vem da imagem de disco
+    std::ifstream in(r->host, std::ios::binary);
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Pacotes do UE3 totalmente comprimidos (tag 0x9E2A83C1 escrita LE): a entrada não é o SHA-1 do ficheiro (Core, Engine,
+    // WarfareGame, _LOC_ …: nenhum prefixo bate). Ficam como estão; os restantes (Coalesced.*, pacotes sem compressão total) são.
+    if (data.size() >= 4 && data[0] == 0xC1 && data[1] == 0x83 && data[2] == 0x2A && data[3] == 0x9E) continue;
+    const std::string hex = xex_image::sha1_hex(data.data(), data.size());
+    uint8_t digest[20];
+    for (int i = 0; i < 20; i++) digest[i] = (uint8_t)std::stoul(hex.substr(2 * i, 2), nullptr, 16);
+    if (std::memcmp(digest, PPC_HOST(m, hash), 20) == 0) continue;
+    std::memcpy(PPC_HOST(m, hash), digest, 20);
+    std::fprintf(stderr, "[xex] HashSec: %s substituído por um ficheiro solto (%s)\n", rel.c_str(), r->host.string().c_str());
+  }
+}
+
 // XexGetModuleSection(HANDLE hModule, PSZ Name, PVOID* Data, PULONG Size)
 XBOX_IMPORT(XexGetModuleSection) {
   uint32_t name_ptr = arg(ctx, 1);
   std::string name = name_ptr ? reinterpret_cast<const char*>(PPC_HOST(mem_base, name_ptr)) : "";
   for (const auto& r : xex::module().resources) {
     if (r.name != name) continue;
+    if (name == "HashSec") {
+      static std::once_flag once;
+      std::call_once(once, [&] { patch_hash_section(mem_base, r.address, r.size); });
+    }
     out32(mem_base, arg(ctx, 2), r.address);
     out32(mem_base, arg(ctx, 3), r.size);
     return ret_status(ctx, kStatusSuccess);

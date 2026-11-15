@@ -23,7 +23,12 @@ struct Resolved {
   bool iso_parent = false;         // a pasta-mãe existe na imagem de disco
 };
 
+// Pasta do jogo com ficheiros soltos: GOW_GAME_DIR, extracted/ ou a pasta escolhida no launcher (GameDir do gow_config.ini).
 std::filesystem::path game_root();
+void set_game_root(const std::filesystem::path& root);
+// O default.xex solto é de outra versão (ex.: com title update): o executável vem da imagem de disco, o resto da pasta.
+void hide_loose_xex(bool hide);
+bool loose_xex_hidden();
 std::filesystem::path user_root();
 std::optional<Resolved> resolve(const std::string& guest_path);
 // Ficheiro do jogo (solto ou na imagem de disco), até max bytes.

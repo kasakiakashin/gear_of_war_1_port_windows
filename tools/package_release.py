@@ -32,14 +32,22 @@ FORBIDDEN = re.compile(r"\.(iso|xex|xxx|bik|sav|bin|pdb|log)$|^base_image|^extra
 LEIAME = """Gears of War 1 - port PC (recompilacao estatica) v{version}
 ==========================================================
 
-Este pacote NAO contem os dados do jogo. Precisa da sua propria copia do disco de
-Gears of War para Xbox 360, em imagem ISO. Nao e preciso extrair nada.
+Este pacote NAO contem os dados do jogo. Precisa da sua propria copia de Gears of War para
+Xbox 360: a imagem ISO do disco, ou uma pasta com o default.xex e a pasta WarGame (dump do disco,
+ou com a title update 5, como as copias para RGH). Nao e preciso extrair nada.
 
 COMO JOGAR
   1. Abra o gow.exe: aparece o launcher.
   2. Se a ISO nao estiver nesta pasta (qualquer nome terminado em .iso), carregue em
-     "Selecionar ISO" (o caminho fica no gow_config.ini).
+     "Selecionar jogo" e escolha a ISO ou o default.xex da pasta do jogo (fica no gow_config.ini).
   3. Carregue em INICIAR JOGO.
+
+VERSOES
+  gow.exe      corre o executavel do disco (versao 0.0.0.1)
+  gow_tu5.exe  corre o da title update 5 (versao 0.0.5.1)
+  O launcher ve a versao do jogo escolhido e abre o executavel certo sozinho. Traducoes (ex.: PT-BR)
+  funcionam nas duas: os ficheiros da pasta do jogo sao usados, e a verificacao de ficheiros do
+  jogo ("dirty disc") aceita-os.
   No launcher estao tambem as configuracoes (as mesmas do F8) e o Co-op (hospedar ou colar
   um convite antes de entrar). gow.exe --skip-launcher abre o jogo diretamente.
 
@@ -113,6 +121,7 @@ def main():
     ap = argparse.ArgumentParser(description="Empacota o gow.exe para distribuicao")
     ap.add_argument("--version", default=DEFAULT_VERSION)
     ap.add_argument("--build-dir", default=os.path.join(ROOT, "build", "runtime"))
+    ap.add_argument("--tu5-build-dir", default=os.path.join(ROOT, "build_tu5", "runtime"))
     ap.add_argument("--shaders", help="prebuilt_shaders.bin já feito com este mesmo gow.exe (senão é gerado agora)")
     ap.add_argument("--no-shaders", action="store_true", help="sem prebuilt_shaders.bin")
     ap.add_argument("--user-dir", help="GOW_USER_DIR com a cache de shaders de uma preparação anterior (não é apagado)")
@@ -131,6 +140,12 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(os.path.join(out, "ffmpeg"))
     shutil.copy2(exe, out)
+    # Title update 5 (cmake -S . -B build_tu5 -DGOW_TITLE_UPDATE5=ON): o gow.exe abre-o quando o jogo escolhido é dessa versão.
+    tu5 = os.path.join(args.tu5_build_dir, "gow.exe")
+    if os.path.isfile(tu5):
+        shutil.copy2(tu5, os.path.join(out, "gow_tu5.exe"))
+    else:
+        print(f"aviso: sem {tu5}; o pacote só corre o executável do disco")
     pack = os.path.join(out, SHADER_PACK)
     if args.shaders:
         shutil.copy2(args.shaders, pack)

@@ -19,6 +19,9 @@ const char kDefaults[] =
     "[Game]\n"
     "; Caminho da ISO do jogo. Vazio = procura um .iso na pasta do gow.exe e, se nao houver, pergunta ao abrir.\n"
     "IsoPath=\n"
+    "; Pasta do jogo (default.xex + WarGame), ex.: um dump ou uma traducao. Os ficheiros dela tem prioridade sobre a ISO; se o\n"
+    "; default.xex for de outra versao (title update), o executavel vem da ISO. Vazio = pasta extracted.\n"
+    "GameDir=\n"
     "; Idioma: English, German, French, Spanish, SpanishLatin, Italian, Korean, Chinese. O disco nao tem Portuguese,\n"
     "; Japanese, SimplifiedChinese, Polish nem Russian: com esses o jogo fica em ingles. Aplicado ao arrancar.\n"
     "Language=English\n"
@@ -131,6 +134,9 @@ Config load() {
     if (key == "IsoPath") {
       if (val.size() >= 2 && val.front() == '"' && val.back() == '"') val = val.substr(1, val.size() - 2);
       c.iso_path = val;
+    } else if (key == "GameDir") {
+      if (val.size() >= 2 && val.front() == '"' && val.back() == '"') val = val.substr(1, val.size() - 2);
+      c.game_dir = val;
     } else if (key.rfind("Key_", 0) == 0) {
       bool known = false;
       for (int a = 0; a < keybinds::kActionCount; a++)
@@ -195,6 +201,7 @@ void save() {
     return std::string(b);
   };
   std::vector<std::pair<std::string, std::string>> values = {{"IsoPath", c.iso_path},
+                                                        {"GameDir", c.game_dir},
                                                         {"Language", c.language},
                                                         {"Volume", num(c.volume)},
                                                         {"VSync", c.vsync ? "1" : "0"},

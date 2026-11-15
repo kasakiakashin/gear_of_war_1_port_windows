@@ -350,4 +350,37 @@ bool decode(const std::vector<uint8_t>& xex, std::vector<uint8_t>* image, std::s
   return lzx_decompress(stream, *image, be32(&xex[ff + 8]), error);
 }
 
+bool image_supported(const std::vector<uint8_t>& image) {
+  if (sha1_hex(image.data(), image.size()) == kExpectedSha1) return true;
+  if (image.size() < kHashSecRva + kHashSecSize) return false;
+  std::vector<uint8_t> masked = image;
+  std::fill_n(masked.begin() + kHashSecRva, kHashSecSize, 0);
+  return sha1_hex(masked.data(), masked.size()) == kExpectedCodeSha1;
+}
+
+int identify(const std::vector<uint8_t>& xex) {
+  const std::string sha = sha1_hex(xex.data(), xex.size());
+  for (int i = 0; i < (int)std::size(kKnown); i++)
+    if (sha == kKnown[i].xex_sha1) return i;
+  std::vector<uint8_t> img;
+  std::string error;
+  if (!decode(xex, &img, &error)) return -1;
+  for (int i = 0; i < (int)std::size(kKnown); i++) {
+    const KnownVersion& k = kKnown[i];
+    if (img.size() != k.image_size) continue;
+    std::vector<uint8_t> masked = img;
+    std::fill_n(masked.begin() + k.hashsec_rva, k.hashsec_size, 0);
+    if (sha1_hex(masked.data(), masked.size()) == k.code_sha1) return i;
+  }
+  return -1;
+}
+
+bool xex_supported(const std::vector<uint8_t>& xex, std::vector<uint8_t>* image) {
+  std::vector<uint8_t> local;
+  std::vector<uint8_t>& img = image ? *image : local;
+  if (sha1_hex(xex.data(), xex.size()) == kExpectedXexSha1 && !image) return true;
+  std::string error;
+  return decode(xex, &img, &error) && image_supported(img);
+}
+
 }  // namespace xex_image

@@ -39,5 +39,13 @@ else()
   endif()
 endif()
 
-add_subdirectory(generated_src)
+# Versão do executável traduzido: o disco (generated_src/, 0.0.0.1) ou a title update 5 (generated_src_tu5/, 0.0.5.1), cada
+# uma num diretório de build próprio: cmake -S . -B build_tu5 -DGOW_TITLE_UPDATE5=ON
+option(GOW_TITLE_UPDATE5 "Traduzir o default.xex da title update 5 (0.0.5.1) em vez do do disco" OFF)
+if(GOW_TITLE_UPDATE5)
+  add_compile_definitions(GOW_TU5=1)
+  add_subdirectory(generated_src_tu5 generated_src)
+else()
+  add_subdirectory(generated_src)
+endif()
 add_subdirectory(runtime)

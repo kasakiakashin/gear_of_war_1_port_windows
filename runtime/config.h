@@ -10,6 +10,7 @@ namespace config {
 
 struct Config {
   std::string iso_path;  // imagem de disco do jogo (UTF-8); vazio = procurar
+  std::string game_dir;  // pasta do jogo (default.xex + WarGame\), por cima da ISO; vazio = pasta extracted
   std::string language = "English";  // ver language.cpp; aplicado ao arrancar
   float volume = 1.0f;     // 0..1
   bool vsync = false;      // sincroniza a apresentação com o monitor

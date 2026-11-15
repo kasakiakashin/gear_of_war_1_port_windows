@@ -5,9 +5,13 @@ extracted/
 
 # SaÃ­da do gerador (tools/ppc_recomp.py regenera tudo a partir de extracted/base_image.bin, ~210 MB)
 generated_src/
+# Tradução da title update 5 (extracted/tu5/base_image.bin): também é código do jogo
+generated_src_tu5/
 
 # Build (CMake/Ninja/Zig)
 build/
+build_tu5/
+build_tu5.log
 dist/
 *.obj
 *.o
