@@ -1,5 +1,6 @@
 #include "gpu/xenos_shader.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -86,7 +87,8 @@ float4 xe_vdecode(uint4 vw, uint d1) {
   const uint e = xe_vfmt[(d1 >> 16) & 63u], kind = e >> 24, fl = (d1 >> 12) & 7u;
   const int ea = (int)(d1 << 2) >> 26;
   const float sc = (kind == 0u || kind == 3u) && ea != 0 ? exp2((float)ea) : 1.0;
-  float x[4] = {0.0, 0.0, 0.0, 1.0};
+  // float4 em vez de float[4]: mesmo desenrolado, o FXC deixava o array indexável (memória) em todos os VS.
+  float4 x = float4(0.0, 0.0, 0.0, 1.0);
   uint o = 0u;
   [unroll] for (uint c = 0u; c < 4u; c++) {
     const uint n = (e >> (6u * c)) & 63u;
@@ -94,12 +96,13 @@ float4 xe_vdecode(uint4 vw, uint d1) {
       const uint wi = o >> 5;
       const uint word = wi == 0u ? vw.x : wi == 1u ? vw.y : wi == 2u ? vw.z : vw.w;
       const uint raw = n == 32u ? word : (word >> (o & 31u)) & ((1u << n) - 1u);
-      x[c] = sc * (kind == 1u ? f16tof32(raw) : kind == 2u ? asfloat(raw) : kind == 3u ? ((fl & 1u) ? (float)(int)raw : (float)raw)
-                                                                                         : xe_conv(raw, n, fl));
+      const float v = sc * (kind == 1u ? f16tof32(raw) : kind == 2u ? asfloat(raw) : kind == 3u ? ((fl & 1u) ? (float)(int)raw : (float)raw)
+                                                                                                 : xe_conv(raw, n, fl));
+      if (c == 0u) x.x = v; else if (c == 1u) x.y = v; else if (c == 2u) x.z = v; else x.w = v;
       o += n;
     }
   }
-  return float4(x[0], x[1], x[2], x[3]);
+  return x;
 }
 // Swizzle de destino do vfetch (palavra 1, 3 bits por componente): 0..3 = componente, 4/6 = 0, 5 = 1, 7 = mantém.
 float xe_vsel(float4 v, float old, uint c) {
@@ -769,6 +772,28 @@ class Translator {
     return true;
   }
 
+  // VPOS no registo de param_gen (escolhido em tempo de execução, xe_flags.z). Escrever r[xe_flags.z & 63] com índice dinâmico
+  // obrigava o FXC a pôr os 64 registos num array indexável (dcl_indexableTemp x0[64]) em TODOS os pixel shaders, ou seja em
+  // memória em vez de registos da GPU (lento nas Intel integradas). Com uma atribuição por registo que o shader usa, com índice
+  // fixo, o array fica em registos. Shaders com endereçamento relativo (aL) já precisam do array indexável: aí fica como era.
+  std::string param_gen_write(const std::string& body) {
+    const std::string vp = "float4(floor(i.pos.xy) * xe_res.xy, 0.0, 0.0)";
+    if (body.find("+ aL) & 63]") != std::string::npos)
+      return "  if (xe_flags.z & 0x100u) r[xe_flags.z & 63u] = " + vp + ";\n";
+    std::set<unsigned> regs;
+    for (size_t p = body.find("r["); p != std::string::npos; p = body.find("r[", p + 2)) {
+      if (p && (std::isalnum((unsigned char)body[p - 1]) || body[p - 1] == '_')) continue;  // ex.: xe_vfr[ ou or[
+      size_t q = p + 2;
+      unsigned v = 0;
+      while (q < body.size() && std::isdigit((unsigned char)body[q])) v = v * 10 + (body[q++] - '0');
+      if (q > p + 2 && q < body.size() && body[q] == ']' && v < 64) regs.insert(v);
+    }
+    if (regs.empty()) return "";
+    std::string s = "  if (xe_flags.z & 0x100u) {\n    const uint pg = xe_flags.z & 63u;\n    const float4 vp = " + vp + ";\n";
+    for (unsigned r : regs) s += fmt("    if (pg == %uu) r[%u] = vp;\n", r, r);
+    return s + "  }\n";
+  }
+
   std::string machine(const std::string& body) {
     std::string s;
     s += "  float4 r[64];\n  [unroll] for (uint ri = 0; ri < 64; ri++) r[ri] = float4(0.0, 0.0, 0.0, 0.0);\n";
@@ -858,7 +883,7 @@ VSOut main(uint vid : SV_VertexID) {
       h += "  float4 oDepth = float4(i.pos.z, 0, 0, 0);\n";
       h += machine(body);
       h += "  [unroll] for (uint k = 0; k < 16; k++) r[k] = i.o[k];\n";
-      h += "  if (xe_flags.z & 0x100u) r[xe_flags.z & 63u] = float4(floor(i.pos.xy) * xe_res.xy, 0.0, 0.0);\n";
+      h += param_gen_write(body);
       h += state_loop(body);
       h += R"(  if (xe_flags.y & 8u) {
     uint f = xe_flags.y & 7u; float a = oC[0].w, ref = xe_alpha_ref.x;
@@ -873,7 +898,50 @@ VSOut main(uint vid : SV_VertexID) {
       if (writes_depth_) h += "  o.depth = saturate(oDepth.x);\n";
       h += "  return o;\n}\n";
     }
-    return h;
+    return scalarize_gprs(h);
+  }
+
+  // O FXC deixa `float4 r[64]` como array indexável (dcl_indexableTemp x0[64]: memória, não registos) mesmo quando todos os
+  // índices são literais. Sem endereçamento relativo (aL), cada r[N] passa a uma variável xrN, só as usadas. Se sobrar algum
+  // acesso não literal, fica o HLSL original.
+  static std::string scalarize_gprs(const std::string& h) {
+    if (h.find("+ aL) & 63]") != std::string::npos) return h;
+    const std::string decl = "  float4 r[64];\n  [unroll] for (uint ri = 0; ri < 64; ri++) r[ri] = float4(0.0, 0.0, 0.0, 0.0);\n";
+    const std::string ps_in = "  [unroll] for (uint k = 0; k < 16; k++) r[k] = i.o[k];\n";
+    const size_t at = h.find(decl);
+    if (at == std::string::npos) return h;
+    std::string s = h.substr(0, at) + "@GPRS@" + h.substr(at + decl.size());
+    std::set<unsigned> used;
+    std::string out;
+    out.reserve(s.size());
+    bool ps_inputs = false;
+    for (size_t p = 0; p < s.size();) {
+      if (s.compare(p, ps_in.size(), ps_in) == 0) {
+        out += "@PSIN@";
+        ps_inputs = true;
+        p += ps_in.size();
+        continue;
+      }
+      if (s[p] == 'r' && p + 1 < s.size() && s[p + 1] == '[' && !(p && (std::isalnum((unsigned char)s[p - 1]) || s[p - 1] == '_'))) {
+        size_t q = p + 2;
+        unsigned v = 0;
+        while (q < s.size() && std::isdigit((unsigned char)s[q])) v = v * 10 + (s[q++] - '0');
+        if (q == p + 2 || q >= s.size() || s[q] != ']' || v >= 64) return h;  // índice não literal
+        used.insert(v);
+        out += fmt("xr%u", v);
+        p = q + 1;
+        continue;
+      }
+      out += s[p++];
+    }
+    std::string gprs, inputs;
+    for (unsigned v : used) gprs += fmt("  float4 xr%u = float4(0.0, 0.0, 0.0, 0.0);\n", v);
+    if (ps_inputs)
+      for (unsigned v : used)
+        if (v < 16) inputs += fmt("  xr%u = i.o[%u];\n", v, v);
+    out.replace(out.find("@GPRS@"), 6, gprs);
+    if (ps_inputs) out.replace(out.find("@PSIN@"), 6, inputs);
+    return out;
   }
 };
 
